@@ -1679,6 +1679,78 @@ Contact:	linux-iio@vger.kernel.org
 Description:
 		Raw counter device counters direction for channel Y.
 
+What:		/sys/bus/iio/devices/iio:deviceX/in_voltageY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_voltageY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_currentY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_currentY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_powerY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_powerY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_accelY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_accelY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_angl_velY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_angl_velY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_magnY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_magnY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_lightY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_lightY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_intensityY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_intensityY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_proximityY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_proximityY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_tempY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_tempY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_incliY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_incliY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_rotY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_rotY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_anglY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_anglY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_timestampY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_timestampY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_capacitanceY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_capacitanceY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_altvoltageY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_altvoltageY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_cctY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_cctY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_pressureY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_pressureY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_humidityrelativeY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_humidityrelativeY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_activityY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_activityY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_stepsY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_stepsY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_energyY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_energyY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_distanceY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_distanceY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_velocityY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_velocityY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_concentrationY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_concentrationY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_resistanceY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_resistanceY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_phY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_phY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_uvindexY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_uvindexY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_electricalconductivityY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_electricalconductivityY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_countY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_countY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_indexY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_indexY_label
+What:		/sys/bus/iio/devices/iio:deviceX/in_gravityY_label
+What:		/sys/bus/iio/devices/iio:deviceX/out_gravityY_label
+KernelVersion:	5.8
+Contact:	linux-iio@vger.kernel.org
+Description:
+		Optional symbolic label to a device channel.
+		If a label is defined for this channel add that to the channel
+		specific attributes. This is useful for userspace to be able to
+		better identify an individual channel.
+
 What:		/sys/bus/iio/devices/iio:deviceX/in_phaseY_raw
 KernelVersion:	4.18
 Contact:	linux-iio@vger.kernel.org
