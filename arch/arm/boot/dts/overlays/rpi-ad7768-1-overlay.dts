@@ -51,6 +51,13 @@
 				reset-gpios = <&gpio 27 1>;
 				clocks = <&ad7768_mclk>;
 				clock-names = "mclk";
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				channel@0 {
+					reg = <0>;
+					label = "channel_0";
+				};
 			};
 		};
 	};
