@@ -8,15 +8,12 @@
 #include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/spi/spi.h>
-#include <linux/dma-mapping.h>
-#include <linux/dmaengine.h>
 #include <linux/regulator/consumer.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
-#include <linux/iio/buffer_impl.h>
-#include <linux/iio/buffer-dma.h>
-#include <linux/iio/buffer-dmaengine.h>
+
+#include "cf_axi_adc.h"
 
 /* AD7768 registers definition */
 #define AD7768_CH_MODE				0x01
@@ -42,11 +39,12 @@
 #define AD7768_MAX_SAMP_FREQ	256000
 #define AD7768_WR_FLAG_MSK(x)	(0x80 | ((x) & 0x7F))
 
+#define AD7768_OUTPUT_MODE_TWOS_COMPLEMENT	0x01
+
 struct ad7768_state {
-	struct spi_device *spi;
+	struct axiadc_converter	*conv;
 	struct mutex lock;
 	struct regulator *vref;
-	struct clk *mclk;
 	unsigned int sampling_freq;
 	__be16 d16;
 };
@@ -104,19 +102,20 @@ static const int ad7768_dec_rate[6] = {
 		},							\
 	}
 
-#define DECLARE_AD7768_CHANNELS(name)	\
-static struct iio_chan_spec name[] = {	\
-		AD7768_CHAN(0), \
-		AD7768_CHAN(1), \
-		AD7768_CHAN(2), \
-		AD7768_CHAN(3), \
-		AD7768_CHAN(4), \
-		AD7768_CHAN(5), \
-		AD7768_CHAN(6), \
-		AD7768_CHAN(7), \
-}
-
-DECLARE_AD7768_CHANNELS(ad7768_channels);
+static const struct axiadc_chip_info conv_chip_info = {
+	.name = "AD7768",
+	.id = ID_AD7768,
+	.max_rate = 256000000UL,
+	.num_channels = 8,
+	.channel[0] = AD7768_CHAN(0),
+	.channel[1] = AD7768_CHAN(1),
+	.channel[2] = AD7768_CHAN(2),
+	.channel[3] = AD7768_CHAN(3),
+	.channel[4] = AD7768_CHAN(4),
+	.channel[5] = AD7768_CHAN(5),
+	.channel[6] = AD7768_CHAN(6),
+	.channel[7] = AD7768_CHAN(7),
+};
 
 static int ad7768_spi_reg_read(struct ad7768_state *st, unsigned int addr)
 {
@@ -134,7 +133,7 @@ static int ad7768_spi_reg_read(struct ad7768_state *st, unsigned int addr)
 
 	st->d16 = cpu_to_be16((AD7768_WR_FLAG_MSK(addr) << 8));
 
-	ret = spi_sync_transfer(st->spi, t, ARRAY_SIZE(t));
+	ret = spi_sync_transfer(st->conv->spi, t, ARRAY_SIZE(t));
 	if (ret < 0)
 		return ret;
 
@@ -147,7 +146,7 @@ static int ad7768_spi_reg_write(struct ad7768_state *st,
 {
 	st->d16 = cpu_to_be16(((addr & 0x7F) << 8) | val);
 
-	return spi_write(st->spi, &st->d16, sizeof(st->d16));
+	return spi_write(st->conv->spi, &st->d16, sizeof(st->d16));
 }
 
 static int ad7768_spi_write_mask(struct ad7768_state *st,
@@ -238,7 +237,7 @@ static int ad7768_samp_freq_config(struct ad7768_state *st,
 	div_set_idx = 0;
 	dec_rate_idx = 0;
 	calc_freq = AD7768_MAX_SAMP_FREQ;
-	mclk_freq = clk_get_rate(st->mclk);
+	mclk_freq = clk_get_rate(st->conv->clk);
 
 	/*
 	 * Sampling freq is defined by MCLK, MCLK_DIV, DCLK_DIV and DEC_RATE:
@@ -321,24 +320,11 @@ static const struct iio_info ad7768_info = {
 	.debugfs_reg_access = &ad7768_reg_access,
 };
 
-static int hw_submit_block(struct iio_dma_buffer_queue *queue,
-	struct iio_dma_buffer_block *block)
-{
-	block->block.bytes_used = block->block.size;
-
-	return iio_dmaengine_buffer_submit_block(queue, block, DMA_DEV_TO_MEM);
-}
-
-static const struct iio_dma_buffer_ops dma_buffer_ops = {
-	.submit = hw_submit_block,
-	.abort = iio_dmaengine_buffer_abort,
-};
-
 static int ad7768_probe(struct spi_device *spi)
 {
-	struct ad7768_state *st;
+	struct axiadc_converter	*conv;
 	struct iio_dev *indio_dev;
-	struct iio_buffer *buffer;
+	struct ad7768_state *st;
 	int ret;
 
 	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
@@ -351,54 +337,45 @@ static int ad7768_probe(struct spi_device *spi)
 	if (IS_ERR(st->vref))
 		return PTR_ERR(st->vref);
 
-	st->mclk = devm_clk_get(&spi->dev, "mclk");
-	if (IS_ERR(st->mclk))
-		return PTR_ERR(st->mclk);
-
-	spi_set_drvdata(spi, indio_dev);
-
-	st->spi = spi;
-
-	mutex_init(&st->lock);
-
-	indio_dev->dev.parent = &spi->dev;
-	indio_dev->name = spi_get_device_id(spi)->name;
-	indio_dev->modes = INDIO_DIRECT_MODE | INDIO_BUFFER_HARDWARE;
-	indio_dev->channels = ad7768_channels;
-	indio_dev->num_channels = ARRAY_SIZE(ad7768_channels);
-	indio_dev->info = &ad7768_info;
-
-	buffer = iio_dmaengine_buffer_alloc(indio_dev->dev.parent, "rx",
-					    &dma_buffer_ops, indio_dev);
-	if (IS_ERR(buffer))
-		return PTR_ERR(buffer);
-
-	iio_device_attach_buffer(indio_dev, buffer);
-
 	ret = regulator_enable(st->vref);
 	if (ret)
 		return ret;
 
-	ret = clk_prepare_enable(st->mclk);
+	conv = devm_kzalloc(&spi->dev, sizeof(*conv), GFP_KERNEL);
+	if (conv == NULL)
+		return -ENOMEM;
+
+	spi_set_drvdata(spi, conv);
+
+	/* This device does not have a chip id register */
+	conv->id = ID_AD7768;
+	conv->spi = spi;
+	conv->clk = devm_clk_get(&spi->dev, "mclk");
+	if (IS_ERR(conv->clk))
+		return PTR_ERR(conv->clk);
+
+	ret = clk_prepare_enable(conv->clk);
 	if (ret < 0)
 		goto error_disable_reg;
 
-	ret = ad7768_samp_freq_config(st, AD7768_MAX_SAMP_FREQ);
-	if (ret < 0)
-		goto error_disable_clk;
+	conv->chip_info = &conv_chip_info;
+	conv->adc_output_mode = AD7768_OUTPUT_MODE_TWOS_COMPLEMENT;
+	conv->reg_access = ad7768_reg_access;
+	conv->write_raw = ad7768_write_raw;
+	conv->read_raw = ad7768_read_raw;
 
-	ret = devm_iio_device_register(&spi->dev, indio_dev);
+	mutex_init(&st->lock);
+
+	ret = ad7768_samp_freq_config(st, AD7768_MAX_SAMP_FREQ);
 	if (ret < 0)
 		goto error_disable_clk;
 
 	return 0;
 
 error_disable_clk:
-	clk_disable_unprepare(st->mclk);
+	clk_disable_unprepare(conv->clk);
 error_disable_reg:
 	regulator_disable(st->vref);
-
-	iio_dmaengine_buffer_free(indio_dev->buffer);
 
 	return ret;
 }
@@ -408,8 +385,7 @@ static int ad7768_remove(struct spi_device *spi)
 	struct iio_dev *indio_dev = spi_get_drvdata(spi);
 	struct ad7768_state *st = iio_priv(indio_dev);
 
-	iio_dmaengine_buffer_free(indio_dev->buffer);
-	clk_disable_unprepare(st->mclk);
+	clk_disable_unprepare(st->conv->clk);
 	regulator_disable(st->vref);
 
 	return 0;

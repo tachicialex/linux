@@ -33,11 +33,11 @@
 };
 
 &fpga_axi {
-	rx_dma: rx-dmac@7c400000 {
+	rx_dma: rx-dmac@7c420000 {
 		compatible = "adi,axi-dmac-1.00.a";
-		reg = <0x7c400000 0x10000>;
+		reg = <0x7c420000 0x10000>;
 		#dma-cells = <1>;
-		interrupts = <0 57 IRQ_TYPE_LEVEL_HIGH>;
+		interrupts = <0 54 IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&clkc 16>;
 
 		adi,channels {
@@ -46,12 +46,20 @@
 
 			dma-channel@0 {
 				reg = <0>;
-				adi,source-bus-width = <32>;
+				adi,source-bus-width = <256>;
 				adi,source-bus-type = <2>;
-				adi,destination-bus-width = <32>;
+				adi,destination-bus-width = <256>;
 				adi,destination-bus-type = <0>;
 			};
 		};
+	};
+
+	axi_adc_ad7768: cf-ad9361-lpc@43c00000 {
+		compatible = "adi,axi-ad7768-rx-1.0";
+		reg = <0x43c00000 0x6000>;
+		dmas = <&rx_dma 0>;
+		dma-names = "rx";
+		spibus-connected = <&ad7768>;
 	};
 };
 
@@ -62,9 +70,6 @@
 		compatible = "adi,ad7768";
 		reg = <0>;
 		spi-max-frequency = <1000000>;
-
-		dmas = <&rx_dma 0>;
-		dma-names = "rx";
 
 		vref-supply = <&vref>;
 		clocks = <&ad7768_mclk>;
