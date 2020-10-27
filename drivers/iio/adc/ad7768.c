@@ -6,6 +6,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/spi/spi.h>
 #include <linux/regulator/consumer.h>
@@ -357,6 +358,11 @@ static int ad7768_probe(struct spi_device *spi)
 	ret = clk_prepare_enable(conv->clk);
 	if (ret < 0)
 		goto error_disable_reg;
+
+	conv->pwrdown_gpio = devm_gpiod_get_optional(&spi->dev, "reset",
+						     GPIOD_OUT_HIGH);
+	if (IS_ERR(conv->pwrdown_gpio))
+		return PTR_ERR(conv->pwrdown_gpio);
 
 	conv->chip_info = &conv_chip_info;
 	conv->adc_output_mode = AD7768_OUTPUT_MODE_TWOS_COMPLEMENT;
