@@ -28,7 +28,7 @@
 
 #include <dt-bindings/iio/adc/adi,ad9208.h>
 
-#define CHIPID_AD9208			0xDF
+#define CHIPID_AD9208			0xDE
 #define CHIPID_MASK			0xFF
 #define ID_DUAL				BIT(31)
 
