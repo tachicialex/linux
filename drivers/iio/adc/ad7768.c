@@ -6,6 +6,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/spi/spi.h>
 #include <linux/dma-mapping.h>
@@ -17,6 +18,8 @@
 #include <linux/iio/buffer_impl.h>
 #include <linux/iio/buffer-dma.h>
 #include <linux/iio/buffer-dmaengine.h>
+
+#include "cf_axi_adc.h"
 
 /* AD7768 registers definition */
 #define AD7768_CH_MODE				0x01
@@ -42,11 +45,15 @@
 #define AD7768_MAX_SAMP_FREQ	256000
 #define AD7768_WR_FLAG_MSK(x)	(0x80 | ((x) & 0x7F))
 
+#define AD7768_OUTPUT_MODE_TWOS_COMPLEMENT	0x01
+
 struct ad7768_state {
+	struct axiadc_converter	*conv;
 	struct spi_device *spi;
 	struct mutex lock;
 	struct regulator *vref;
 	struct clk *mclk;
+	bool has_axi_adc;
 	unsigned int sampling_freq;
 	__be16 d16;
 };
@@ -117,6 +124,27 @@ static struct iio_chan_spec name[] = {	\
 }
 
 DECLARE_AD7768_CHANNELS(ad7768_channels);
+
+static const unsigned long ad7768_available_scan_masks[] = {
+	0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x800,
+	0x1000, 0x2000, 0x4000, 0x8000, 0x10000
+};
+
+static const struct axiadc_chip_info conv_chip_info = {
+	.name = "AD7768",
+	.max_rate = 256000000UL,
+	.num_channels = 8,
+	.num_shadow_slave_channels = 0,
+	.scan_masks = ad7768_available_scan_masks,
+	.channel[0] = AD7768_CHAN(0),
+	.channel[1] = AD7768_CHAN(1),
+	.channel[2] = AD7768_CHAN(2),
+	.channel[3] = AD7768_CHAN(3),
+	.channel[4] = AD7768_CHAN(4),
+	.channel[5] = AD7768_CHAN(5),
+	.channel[6] = AD7768_CHAN(6),
+	.channel[7] = AD7768_CHAN(7),
+};
 
 static int ad7768_spi_reg_read(struct ad7768_state *st, unsigned int addr)
 {
@@ -336,6 +364,7 @@ static const struct iio_dma_buffer_ops dma_buffer_ops = {
 
 static int ad7768_probe(struct spi_device *spi)
 {
+	struct fwnode_handle *fwnode;
 	struct ad7768_state *st;
 	struct iio_dev *indio_dev;
 	struct iio_buffer *buffer;
@@ -347,49 +376,76 @@ static int ad7768_probe(struct spi_device *spi)
 
 	st = iio_priv(indio_dev);
 
+	fwnode = dev_fwnode(&spi->dev);
+	st->has_axi_adc = !fwnode_property_present(fwnode, "dmas");
+
+	if (st->has_axi_adc) {
+		st->conv = devm_kzalloc(&spi->dev, sizeof(*(st->conv)),
+					GFP_KERNEL);
+		if (st->conv == NULL)
+			return -ENOMEM;
+	}
+
 	st->vref = devm_regulator_get(&spi->dev, "vref");
 	if (IS_ERR(st->vref))
 		return PTR_ERR(st->vref);
+	ret = regulator_enable(st->vref);
+	if (ret)
+		return ret;
 
 	st->mclk = devm_clk_get(&spi->dev, "mclk");
 	if (IS_ERR(st->mclk))
 		return PTR_ERR(st->mclk);
+	if (st->has_axi_adc)
+		st->conv->clk = st->mclk;
+	ret = clk_prepare_enable(st->mclk);
+	if (ret < 0)
+		goto error_disable_reg;
 
 	spi_set_drvdata(spi, indio_dev);
 
 	st->spi = spi;
 
-	mutex_init(&st->lock);
-
-	indio_dev->dev.parent = &spi->dev;
-	indio_dev->name = spi_get_device_id(spi)->name;
-	indio_dev->modes = INDIO_DIRECT_MODE | INDIO_BUFFER_HARDWARE;
-	indio_dev->channels = ad7768_channels;
-	indio_dev->num_channels = ARRAY_SIZE(ad7768_channels);
-	indio_dev->info = &ad7768_info;
-
-	buffer = iio_dmaengine_buffer_alloc(indio_dev->dev.parent, "rx",
-					    &dma_buffer_ops, indio_dev);
-	if (IS_ERR(buffer))
-		return PTR_ERR(buffer);
-
-	iio_device_attach_buffer(indio_dev, buffer);
-
-	ret = regulator_enable(st->vref);
-	if (ret)
-		return ret;
-
-	ret = clk_prepare_enable(st->mclk);
-	if (ret < 0)
-		goto error_disable_reg;
-
 	ret = ad7768_samp_freq_config(st, AD7768_MAX_SAMP_FREQ);
 	if (ret < 0)
 		goto error_disable_clk;
 
-	ret = devm_iio_device_register(&spi->dev, indio_dev);
-	if (ret < 0)
-		goto error_disable_clk;
+	mutex_init(&st->lock);
+
+	if (st->has_axi_adc) {
+		/* This device does not have a chip id register */
+		st->conv->id = ID_AD7768;
+		st->conv->spi = spi;
+		// st->conv->pwrdown_gpio = devm_gpiod_get_optional(&spi->dev, "reset",
+		// 					     GPIOD_OUT_HIGH);
+		// if (IS_ERR(st->conv->pwrdown_gpio))
+		// 	return PTR_ERR(st->conv->pwrdown_gpio);
+
+		st->conv->chip_info = &conv_chip_info;
+		st->conv->adc_output_mode = AD7768_OUTPUT_MODE_TWOS_COMPLEMENT;
+		st->conv->reg_access = ad7768_reg_access;
+		st->conv->write_raw = ad7768_write_raw;
+		st->conv->read_raw = ad7768_read_raw;
+		spi_set_drvdata(spi, st->conv); /* Take care here */
+	} else {
+		indio_dev->dev.parent = &spi->dev;
+		indio_dev->name = spi_get_device_id(spi)->name;
+		indio_dev->modes = INDIO_DIRECT_MODE | INDIO_BUFFER_HARDWARE;
+		indio_dev->channels = ad7768_channels;
+		indio_dev->num_channels = ARRAY_SIZE(ad7768_channels);
+		indio_dev->info = &ad7768_info;
+
+		buffer = iio_dmaengine_buffer_alloc(indio_dev->dev.parent, "rx",
+						    &dma_buffer_ops, indio_dev);
+		if (IS_ERR(buffer))
+			return PTR_ERR(buffer);
+
+		iio_device_attach_buffer(indio_dev, buffer);
+
+		ret = devm_iio_device_register(&spi->dev, indio_dev);
+		if (ret < 0)
+			goto error_disable_clk;
+	}
 
 	return 0;
 
@@ -398,7 +454,8 @@ error_disable_clk:
 error_disable_reg:
 	regulator_disable(st->vref);
 
-	iio_dmaengine_buffer_free(indio_dev->buffer);
+	if (!st->has_axi_adc)
+		iio_dmaengine_buffer_free(indio_dev->buffer);
 
 	return ret;
 }
@@ -408,7 +465,8 @@ static int ad7768_remove(struct spi_device *spi)
 	struct iio_dev *indio_dev = spi_get_drvdata(spi);
 	struct ad7768_state *st = iio_priv(indio_dev);
 
-	iio_dmaengine_buffer_free(indio_dev->buffer);
+	if (!st->has_axi_adc)
+		iio_dmaengine_buffer_free(indio_dev->buffer);
 	clk_disable_unprepare(st->mclk);
 	regulator_disable(st->vref);
 
