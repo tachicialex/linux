@@ -31,6 +31,7 @@
 #include "adi_adrv9001_cals_types.h"
 #include "adi_common_types.h"
 #include "adi_adrv9001_gpio.h"
+#include "adrv9001_gpio.h"
 #include "adi_adrv9001_gpio_types.h"
 #include "adi_adrv9001_powermanagement.h"
 #include "adi_adrv9001_powermanagement_types.h"
@@ -1760,16 +1761,26 @@ static irqreturn_t adrv9002_irq_handler(int irq, void *p)
 	u8 error;
 
 	mutex_lock(&phy->lock);
-	ret = adi_adrv9001_gpio_GpIntHandler(phy->adrv9001, &gp_stat);
+	ret = adrv9001_GpInterruptsMaskPinBfGet(phy->adrv9001, &gp_stat.gpIntSaveIrqMask);
+	if (ret)
+		goto error;
+
+	ret = adrv9001_GpInterruptsMaskPinBfSet(phy->adrv9001, 0xFFFFFFFF);
+	if (ret)
+		goto error;
+
+	ret = adrv9001_GpInterruptsStatusWordBfGet(phy->adrv9001, &gp_stat.gpIntStatus);
+	if (ret)
+		goto error;
 	mutex_unlock(&phy->lock);
 
-	/* clear the logger */
-	adi_common_ErrorClear(&phy->adrv9001->common);
+	///* clear the logger */
+	//adi_common_ErrorClear(&phy->adrv9001->common);
 
 	dev_warn(&phy->spi->dev, "GP Interrupt Status 0x%08X Mask 0x%08X\n",
 		 gp_stat.gpIntStatus, ~gp_stat.gpIntSaveIrqMask & 0x0FFFFFFF);
 
-	active_irq = gp_stat.gpIntActiveSources;
+	active_irq = gp_stat.gpIntStatus & ~gp_stat.gpIntMask;
 	for_each_set_bit(bit, &active_irq, ARRAY_SIZE(adrv9002_irqs)) {
 		dev_warn(&phy->spi->dev, "%d: %s\n",bit, adrv9002_irqs[bit]);
 	}
@@ -1796,7 +1807,17 @@ static irqreturn_t adrv9002_irq_handler(int irq, void *p)
 		break;
 	}
 
+	/* restore irq mask */
+	mutex_lock(&phy->lock);
+	ret = adrv9001_GpInterruptsMaskPinBfSet(phy->adrv9001, gp_stat.gpIntSaveIrqMask);
+	if (ret)
+		goto error;
+	mutex_unlock(&phy->lock);
+
 	return IRQ_HANDLED;
+error:
+	mutex_unlock(&phy->lock);
+	return adrv9002_dev_err(phy);
 }
 
 static int adrv9002_dgpio_config(struct adrv9002_rf_phy *phy)
