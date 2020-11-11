@@ -711,6 +711,12 @@ int ad9081_iio_str_to_val(const char *str, int min, int max, int *val)
 	return ret;
 }
 
+static u32 ad9081_adc_chan_to_fddc(struct ad9081_phy *phy,
+	const struct iio_chan_spec *chan)
+{
+	return phy->jesd_rx_link[0].link_converter_select[chan->address] / 2;
+}
+
 static ssize_t ad9081_ext_info_read(struct iio_dev *indio_dev,
 				    uintptr_t private,
 				    const struct iio_chan_spec *chan, char *buf)
@@ -736,9 +742,7 @@ static ssize_t ad9081_ext_info_read(struct iio_dev *indio_dev,
 				}
 			}
 		} else {
-			fddc_num =
-				phy->jesd_rx_link[0].link_converter_select[
-					chan->address] / 2;
+			fddc_num = ad9081_adc_chan_to_fddc(phy, chan);
 			adi_ad9081_adc_xbar_find_cddc(&phy->ad9081,
 						      BIT(fddc_num), &cddc);
 			val = phy->rx_cddc_shift[ilog2(cddc)];
@@ -750,9 +754,7 @@ static ssize_t ad9081_ext_info_read(struct iio_dev *indio_dev,
 			val = phy->tx_chan_shift[chan->channel];
 			ret = 0;
 		} else {
-			fddc_num =
-				phy->jesd_rx_link[0].link_converter_select[
-					chan->address] / 2;
+			fddc_num = ad9081_adc_chan_to_fddc(phy, chan);
 			val = phy->rx_fddc_shift[fddc_num];
 			ret = 0;
 		}
@@ -769,9 +771,7 @@ static ssize_t ad9081_ext_info_read(struct iio_dev *indio_dev,
 				}
 			}
 		} else {
-			fddc_num =
-				phy->jesd_rx_link[0].link_converter_select[
-					chan->address] / 2;
+			fddc_num = ad9081_adc_chan_to_fddc(phy, chan);
 			adi_ad9081_adc_xbar_find_cddc(&phy->ad9081,
 						BIT(fddc_num), &cddc);
 			val = phy->rx_cddc_phase[ilog2(cddc)];
@@ -783,9 +783,7 @@ static ssize_t ad9081_ext_info_read(struct iio_dev *indio_dev,
 			val = phy->dac_cache.chan_phase[chan->channel];
 			ret = 0;
 		} else {
-			fddc_num =
-				phy->jesd_rx_link[0].link_converter_select[
-					chan->address] / 2;
+			fddc_num = ad9081_adc_chan_to_fddc(phy, chan);
 			val = phy->rx_fddc_phase[fddc_num];
 			ret = 0;
 		}
@@ -1649,13 +1647,10 @@ static int ad9081_setup(struct spi_device *spi)
 	dev_dbg(&spi->dev, "DAC IRQ status 0x%llX\n", status64);
 
 	sample_rate = DIV_ROUND_CLOSEST_ULL(phy->adc_frequency_hz, dcm);
-               clk_set_rate(phy->clks[RX_SAMPL_CLK], sample_rate);
-
 	clk_set_rate(phy->clks[RX_SAMPL_CLK], sample_rate);
 
 	sample_rate = DIV_ROUND_CLOSEST_ULL(phy->dac_frequency_hz,
-                                      phy->tx_main_interp * phy->tx_chan_interp);
-
+			phy->tx_main_interp * phy->tx_chan_interp);
 	clk_set_rate(phy->clks[TX_SAMPL_CLK], sample_rate);
 
 	ret = adi_ad9081_adc_nyquist_zone_set(&phy->ad9081,
@@ -1789,6 +1784,10 @@ static int ad9081_write_raw(struct iio_dev *indio_dev,
 	return 0;
 }
 
+static const char* const ffh_modes[] = {
+	"phase_continuous", "phase_incontinuous", "phase coherent"
+};
+
 static ssize_t ad9081_phy_store(struct device *dev,
 				struct device_attribute *attr,
 				const char *buf, size_t len)
@@ -1871,20 +1870,20 @@ static ssize_t ad9081_phy_store(struct device *dev,
 		phy->ffh_hopf_vals[phy->ffh_hopf_index] = res;
 		break;
 	case AD9081_DAC_FFH_MODE_SET:
-		ret = kstrtoul(buf, 0, &res);
-		if (ret) {
+		ret = sysfs_match_string(ffh_modes, buf);
+		if (ret < 0) {
 			ret = -EINVAL;
 			break;
 		}
 
 		ret = adi_ad9081_dac_duc_main_nco_hopf_mode_set(&phy->ad9081,
-						  AD9081_DAC_ALL, res);
+						  AD9081_DAC_ALL, ret);
 		if (ret) {
 			ret = -EINVAL;
 			break;
 		}
 
-		phy->ffh_hopf_mode = res;
+		phy->ffh_hopf_mode = ret;
 		break;
 	default:
 		ret = -EINVAL;
@@ -1920,7 +1919,7 @@ static ssize_t ad9081_phy_show(struct device *dev,
 		ret = sprintf(buf, "%u\n", phy->ffh_hopf_vals[phy->ffh_hopf_index]);
 		break;
 	case AD9081_DAC_FFH_MODE_SET:
-		ret = sprintf(buf, "%u\n", phy->ffh_hopf_mode);
+		ret = sprintf(buf, "%s\n", ffh_modes[phy->ffh_hopf_mode]);
 		break;
 	case AD9081_MCS:
 		ret = sprintf(buf, "%u\n", phy->mcs_cached_val);
@@ -1963,6 +1962,9 @@ static IIO_DEVICE_ATTR(out_voltage_main_ffh_mode, S_IRUGO | S_IWUSR,
 		ad9081_phy_store,
 		AD9081_DAC_FFH_MODE_SET);
 
+static IIO_CONST_ATTR(out_voltage_main_ffh_mode_available,
+		"phase_continuous phase_incontinuous phase_coherent");
+
 static struct attribute *ad9081_phy_attributes[] = {
 	&iio_dev_attr_loopback_mode.dev_attr.attr,
 	&iio_dev_attr_adc_clk_powerdown.dev_attr.attr,
@@ -1970,6 +1972,7 @@ static struct attribute *ad9081_phy_attributes[] = {
 	&iio_dev_attr_out_voltage_main_ffh_frequency.dev_attr.attr,
 	&iio_dev_attr_out_voltage_main_ffh_index.dev_attr.attr,
 	&iio_dev_attr_out_voltage_main_ffh_mode.dev_attr.attr,
+	&iio_const_attr_out_voltage_main_ffh_mode_available.dev_attr.attr,
 	NULL,
 };
 
@@ -2964,7 +2967,7 @@ static int ad9081_setup_chip_info_tbl(struct ad9081_phy *phy,
 		phy->chip_info.channel[c].scan_type.realbits =
 			phy->jesd_rx_link[0].jesd_param.jesd_n;
 		phy->chip_info.channel[c].scan_type.storagebits =
-			phy->jesd_rx_link[0].jesd_param.jesd_np;
+			(phy->jesd_rx_link[0].jesd_param.jesd_np > 8) ? 16 : 8;
 		phy->chip_info.channel[c].scan_type.sign = 's';
 	}
 

@@ -128,7 +128,8 @@
 #define ADAR1000_CH2_EN			BIT(5)
 #define ADAR1000_CH3_EN			BIT(4)
 #define ADAR1000_CH4_EN			BIT(3)
-#define ADAR1000_LNA_EN			BIT(2)
+#define ADAR1000_RX_LNA_EN		BIT(2)
+#define ADAR1000_TX_DRV_EN		BIT(3)
 #define ADAR1000_VM_EN			BIT(1)
 #define ADAR1000_VGA_EN			BIT(0)
 
@@ -693,13 +694,17 @@ enum adar1000_iio_dev_attr {
 	ADAR1000_RX_LNA,
 	ADAR1000_TX_VGA,
 	ADAR1000_TX_VM,
-	ADAR1000_TX_LNA,
+	ADAR1000_TX_DRV,
 	ADAR1000_LNABIAS_ON,
 	ADAR1000_LNABIAS_OFF,
 	ADAR1000_CUR_RX_LNA,
 	ADAR1000_CUR_RX,
 	ADAR1000_CUR_TX,
 	ADAR1000_CUR_TX_DRV,
+	ADAR1000_SW_DRV_TR_MODE_SEL_,
+	ADAR1000_BIAS_CTRL_,
+	ADAR1000_BIAS_EN_,
+	ADAR1000_LNA_BIAS_OUT_EN_,
 };
 
 static ssize_t adar1000_store(struct device *dev,
@@ -747,13 +752,13 @@ static ssize_t adar1000_store(struct device *dev,
 		break;
 	case ADAR1000_RX_LNA:
 		reg = ADAR1000_RX_ENABLES;
-		mask = ADAR1000_LNA_EN;
+		mask = ADAR1000_RX_LNA_EN;
 		ret = kstrtobool(buf, &readin);
 		if (ret)
 			return ret;
 
 		if (readin)
-			val = ADAR1000_LNA_EN;
+			val = ADAR1000_RX_LNA_EN;
 		break;
 	case ADAR1000_TX_VGA:
 		reg = ADAR1000_TX_ENABLES;
@@ -775,15 +780,15 @@ static ssize_t adar1000_store(struct device *dev,
 		if (readin)
 			val = ADAR1000_VM_EN;
 		break;
-	case ADAR1000_TX_LNA:
+	case ADAR1000_TX_DRV:
 		reg = ADAR1000_TX_ENABLES;
-		mask = ADAR1000_LNA_EN;
+		mask = ADAR1000_TX_DRV_EN;
 		ret = kstrtobool(buf, &readin);
 		if (ret)
 			return ret;
 
 		if (readin)
-			val = ADAR1000_LNA_EN;
+			val = ADAR1000_TX_DRV_EN;
 		break;
 	case ADAR1000_LNABIAS_ON:
 		reg = ADAR1000_LNA_BIAS_ON;
@@ -828,6 +833,46 @@ static ssize_t adar1000_store(struct device *dev,
 			return ret;
 
 		readval &= 0x7;
+		break;
+	case ADAR1000_SW_DRV_TR_MODE_SEL_:
+		reg = ADAR1000_MISC_ENABLES;
+		mask = ADAR1000_SW_DRV_TR_MODE_SEL;
+		ret = kstrtobool(buf, &readin);
+		if (ret)
+			return ret;
+
+		if (readin)
+			val = ADAR1000_SW_DRV_TR_MODE_SEL;
+		break;
+	case ADAR1000_BIAS_CTRL_:
+		reg = ADAR1000_MISC_ENABLES;
+		mask = ADAR1000_BIAS_CTRL;
+		ret = kstrtobool(buf, &readin);
+		if (ret)
+			return ret;
+
+		if (readin)
+			val = ADAR1000_BIAS_CTRL;
+		break;
+	case ADAR1000_BIAS_EN_:
+		reg = ADAR1000_MISC_ENABLES;
+		mask = ADAR1000_BIAS_EN;
+		ret = kstrtobool(buf, &readin);
+		if (ret)
+			return ret;
+
+		if (readin)
+			val = ADAR1000_BIAS_EN;
+		break;
+	case ADAR1000_LNA_BIAS_OUT_EN_:
+		reg = ADAR1000_MISC_ENABLES;
+		mask = ADAR1000_LNA_BIAS_OUT_EN;
+		ret = kstrtobool(buf, &readin);
+		if (ret)
+			return ret;
+
+		if (readin)
+			val = ADAR1000_LNA_BIAS_OUT_EN;
 		break;
 	default:
 		return -EINVAL;
@@ -877,7 +922,7 @@ static ssize_t adar1000_show(struct device *dev,
 		break;
 	case ADAR1000_RX_LNA:
 		reg = ADAR1000_RX_ENABLES;
-		mask = ADAR1000_LNA_EN;
+		mask = ADAR1000_RX_LNA_EN;
 		break;
 	case ADAR1000_TX_VGA:
 		reg = ADAR1000_TX_ENABLES;
@@ -887,9 +932,9 @@ static ssize_t adar1000_show(struct device *dev,
 		reg = ADAR1000_TX_ENABLES;
 		mask = ADAR1000_VM_EN;
 		break;
-	case ADAR1000_TX_LNA:
+	case ADAR1000_TX_DRV:
 		reg = ADAR1000_TX_ENABLES;
-		mask = ADAR1000_LNA_EN;
+		mask = ADAR1000_TX_DRV_EN;
 		break;
 	case ADAR1000_LNABIAS_ON:
 		reg = ADAR1000_LNA_BIAS_ON;
@@ -908,6 +953,22 @@ static ssize_t adar1000_show(struct device *dev,
 		break;
 	case ADAR1000_CUR_TX_DRV:
 		reg = ADAR1000_BIAS_CURRENT_TX_DRV;
+		break;
+	case ADAR1000_SW_DRV_TR_MODE_SEL_:
+		reg = ADAR1000_MISC_ENABLES;
+		mask = ADAR1000_SW_DRV_TR_MODE_SEL;
+		break;
+	case ADAR1000_BIAS_CTRL_:
+		reg = ADAR1000_MISC_ENABLES;
+		mask = ADAR1000_BIAS_CTRL;
+		break;
+	case ADAR1000_BIAS_EN_:
+		reg = ADAR1000_MISC_ENABLES;
+		mask = ADAR1000_BIAS_EN;
+		break;
+	case ADAR1000_LNA_BIAS_OUT_EN_:
+		reg = ADAR1000_MISC_ENABLES;
+		mask = ADAR1000_LNA_BIAS_OUT_EN;
 		break;
 	default:
 		return -EINVAL;
@@ -1019,8 +1080,18 @@ static IIO_DEVICE_ATTR(tx_vga_enable, 0644,
 static IIO_DEVICE_ATTR(tx_vm_enable, 0644,
 		       adar1000_show, adar1000_store, ADAR1000_TX_VM);
 
-static IIO_DEVICE_ATTR(tx_lna_enable, 0644,
-		       adar1000_show, adar1000_store, ADAR1000_TX_LNA);
+static IIO_DEVICE_ATTR(tx_drv_enable, 0644,
+		       adar1000_show, adar1000_store, ADAR1000_TX_DRV);
+
+/* MISC_ENABLES */
+static IIO_DEVICE_ATTR(sw_drw_tr_mode_sel, 0644,
+		       adar1000_show, adar1000_store, ADAR1000_SW_DRV_TR_MODE_SEL);
+static IIO_DEVICE_ATTR(bias_ctrl, 0644,
+		       adar1000_show, adar1000_store, ADAR1000_BIAS_CTRL);
+static IIO_DEVICE_ATTR(bias_enable, 0644,
+		       adar1000_show, adar1000_store, ADAR1000_BIAS_EN);
+static IIO_DEVICE_ATTR(lna_bias_out_enable, 0644,
+		       adar1000_show, adar1000_store, ADAR1000_LNA_BIAS_OUT_EN);
 
 /* LNA BIAS setting */
 static IIO_DEVICE_ATTR(lna_bias_off, 0644,
@@ -1050,13 +1121,14 @@ static IIO_DEVICE_ATTR(sequencer_enable, 0200, NULL, adar1000_seq_enable, 0);
 
 /* Generate CLK cycles for SPI */
 static IIO_DEVICE_ATTR(gen_clk_cycles, 0200, NULL, adar1000_gen_clk_cycles, 0);
+
 static struct attribute *adar1000_attributes[] = {
 	&iio_dev_attr_rx_vga_enable.dev_attr.attr,
 	&iio_dev_attr_rx_vm_enable.dev_attr.attr,
 	&iio_dev_attr_rx_lna_enable.dev_attr.attr,
 	&iio_dev_attr_tx_vga_enable.dev_attr.attr,
 	&iio_dev_attr_tx_vm_enable.dev_attr.attr,
-	&iio_dev_attr_tx_lna_enable.dev_attr.attr,
+	&iio_dev_attr_tx_drv_enable.dev_attr.attr,
 	&iio_dev_attr_lna_bias_off.dev_attr.attr,
 	&iio_dev_attr_lna_bias_on.dev_attr.attr,
 	&iio_dev_attr_bias_current_rx_lna.dev_attr.attr,
@@ -1066,6 +1138,10 @@ static struct attribute *adar1000_attributes[] = {
 	&iio_dev_attr_reset.dev_attr.attr,
 	&iio_dev_attr_sequencer_enable.dev_attr.attr,
 	&iio_dev_attr_gen_clk_cycles.dev_attr.attr,
+	&iio_dev_attr_sw_drw_tr_mode_sel.dev_attr.attr,
+	&iio_dev_attr_bias_ctrl.dev_attr.attr,
+	&iio_dev_attr_bias_enable.dev_attr.attr,
+	&iio_dev_attr_lna_bias_out_enable.dev_attr.attr,
 	NULL,
 };
 
