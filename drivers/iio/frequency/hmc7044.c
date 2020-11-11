@@ -1563,6 +1563,7 @@ static int hmc7044_lmfc_lemc_validate(struct hmc7044 *hmc, u64 dividend, u32 div
 		return 0;
 	}
 
+	div_u64_rem(dividend, divisor, &rem);
 	div_u64_rem(dividend, divisor - 1, &rem_l);
 	div_u64_rem(dividend, divisor + 1, &rem_u);
 
