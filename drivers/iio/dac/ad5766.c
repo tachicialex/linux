@@ -52,6 +52,13 @@ static int ad5766_set_dither_source(struct iio_dev *dev,
 			     const struct iio_chan_spec *chan,
 			     unsigned int mode);
 
+static int ad5766_get_dither_scale(struct iio_dev *dev,
+			     const struct iio_chan_spec *chan);
+
+static int ad5766_set_dither_scale(struct iio_dev *dev,
+			     const struct iio_chan_spec *chan,
+			     unsigned int mode);
+
 #define _AD5766_CHAN_EXT_INFO(_name, _what, _shared) { \
 	.name = _name, \
 	.read = ad5766_read_ext, \
@@ -70,11 +77,25 @@ static const char * const ad5766_dither_sources[] = {
 	"N1",
 };
 
+static const char * const ad5766_dither_scales[] = {
+	"NO_SCALING",
+	"75%_SCALING",
+	"50%_SCALING",
+	"25%_SCALING",
+};
+
 static const struct iio_enum ad5766_dither_source_enum = {
 	.items = ad5766_dither_sources,
 	.num_items = ARRAY_SIZE(ad5766_dither_sources),
 	.set = ad5766_set_dither_source,
 	.get = ad5766_get_dither_source,
+};
+
+static const struct iio_enum ad5766_dither_scale_enum = {
+	.items = ad5766_dither_scales,
+	.num_items = ARRAY_SIZE(ad5766_dither_scales),
+	.set = ad5766_set_dither_scale,
+	.get = ad5766_get_dither_scale,
 };
 
 static const struct iio_chan_spec_ext_info ad5766_ext_info[] = {
@@ -83,6 +104,10 @@ static const struct iio_chan_spec_ext_info ad5766_ext_info[] = {
 	IIO_ENUM_AVAILABLE_SHARED("dither_source",
 				  IIO_SEPARATE,
 				  &ad5766_dither_source_enum),
+	IIO_ENUM("dither_scale", IIO_SEPARATE, &ad5766_dither_scale_enum),
+	IIO_ENUM_AVAILABLE_SHARED("dither_scale",
+				  IIO_SEPARATE,
+				  &ad5766_dither_scale_enum),
 	{},
 };
 
@@ -161,6 +186,8 @@ struct ad5766_chip_info {
  *			example, D15 = DAC 15,D8 = DAC 8, and D0 = DAC 0)
  *			0 - Normal operation, 1 - Power down
  * @dither_source:	Selects between 3 possible sources: No dither, N0, N1
+ * @dither_source:	Selects between 4 possible sources:
+ *			No scale, 75%, 50%, 25%
  * @scale_avail:	Scale available table
  * @offset_avail:	Offest available table
  * @data:		Spi transfer buffers
@@ -175,6 +202,7 @@ struct ad5766_state {
 	enum ad5766_voltage_range	cached_offset;
 	u16		dither_power_ctrl;
 	u32		dither_source;
+	u32		dither_scale;
 	s32		scale_avail[AD5766_VOLTAGE_RANGE_MAX][2];
 	s32		offset_avail[AD5766_VOLTAGE_RANGE_MAX][2];
 	union {
@@ -364,6 +392,18 @@ static int ad5766_default_setup(struct ad5766_state *st,
 	if (ret)
 		return ret;
 
+	st->dither_scale = 0;
+	ret = _ad5766_spi_write(st, AD5766_CMD_DITHER_SCALE_1,
+			  st->dither_scale & 0xFFFF);
+	if (ret)
+		return ret;
+
+	ret = _ad5766_spi_write(st, AD5766_CMD_DITHER_SCALE_2,
+			  (st->dither_scale >> 16) & 0xFFFF);
+	if (ret)
+		return ret;
+
+
 	return 0;
 }
 
@@ -523,6 +563,33 @@ static int ad5766_set_dither_source(struct iio_dev *dev,
 
 	return ad5766_write(dev, AD5766_CMD_DITHER_SIG_2,
 			  (st->dither_source >> 16) & 0xFFFF);
+}
+
+static int ad5766_get_dither_scale(struct iio_dev *dev,
+				   const struct iio_chan_spec *chan)
+{
+	struct ad5766_state *st = iio_priv(dev);
+
+	return (st->dither_scale >> (chan->channel * 2) & 0x03);
+}
+
+static int ad5766_set_dither_scale(struct iio_dev *dev,
+			  const struct iio_chan_spec *chan,
+			  unsigned int scale)
+{
+	int ret;
+	struct ad5766_state *st = iio_priv(dev);
+
+	st->dither_scale = (st->dither_scale & ~(0x03 << (chan->channel * 2)))
+			    | (scale << (chan->channel * 2));
+
+	ret = ad5766_write(dev, AD5766_CMD_DITHER_SCALE_1,
+			  st->dither_scale & 0xFFFF);
+	if (ret)
+		return ret;
+
+	return ad5766_write(dev, AD5766_CMD_DITHER_SCALE_2,
+			  (st->dither_scale >> 16) & 0xFFFF);
 }
 
 static ssize_t ad5766_read_ext(struct iio_dev *indio_dev,
