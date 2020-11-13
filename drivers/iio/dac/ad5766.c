@@ -36,6 +36,32 @@ enum ad5766_type {
 	ID_AD5767,
 };
 
+static ssize_t ad5766_write_ext(struct iio_dev *indio_dev,
+				 uintptr_t private,
+				 const struct iio_chan_spec *chan,
+				 const char *buf, size_t len);
+static ssize_t ad5766_read_ext(struct iio_dev *indio_dev,
+			       uintptr_t private,
+			       const struct iio_chan_spec *chan,
+			       char *buf);
+
+#define _AD5766_CHAN_EXT_INFO(_name, _what, _shared) { \
+	.name = _name, \
+	.read = ad5766_read_ext, \
+	.write = ad5766_write_ext, \
+	.private = _what, \
+	.shared = _shared, \
+}
+
+enum {
+	AD5766_DITHER_PWR,
+};
+
+static const struct iio_chan_spec_ext_info ad5766_ext_info[] = {
+	_AD5766_CHAN_EXT_INFO("dither_pwr", AD5766_DITHER_PWR, IIO_SEPARATE),
+	{},
+};
+
 #define AD576x_CHANNEL(_chan, _bits) {					\
 	.type = IIO_VOLTAGE,						\
 	.indexed = 1,							\
@@ -53,6 +79,7 @@ enum ad5766_type {
 		.storagebits = 16,					\
 		.shift = 16 - (_bits),					\
 	},								\
+	.ext_info = ad5766_ext_info,					\
 }
 
 #define DECLARE_AD576x_CHANNELS(_name, _bits)			\
@@ -106,6 +133,9 @@ struct ad5766_chip_info {
  * @gpio_reset:		Reset gpio
  * @crt_range:		Current selected output range
  * @cached_offset:	Cached range coresponding to the selected offset
+ * @dither_power_ctrl:	Power-down bit for each channel dither block (for
+ *			example, D15 = DAC 15,D8 = DAC 8, and D0 = DAC 0)
+ *			0 - Normal operation, 1 - Power down
  * @scale_avail:	Scale available table
  * @offset_avail:	Offest available table
  * @data:		Spi transfer buffers
@@ -118,6 +148,7 @@ struct ad5766_state {
 	struct gpio_desc		*gpio_reset;
 	enum ad5766_voltage_range	crt_range;
 	enum ad5766_voltage_range	cached_offset;
+	u16		dither_power_ctrl;
 	s32		scale_avail[AD5766_VOLTAGE_RANGE_MAX][2];
 	s32		offset_avail[AD5766_VOLTAGE_RANGE_MAX][2];
 	union {
@@ -290,6 +321,12 @@ static int ad5766_default_setup(struct ad5766_state *st,
 	st->crt_range = range;
 	st->cached_offset = range;
 
+	st->dither_power_ctrl = 0;
+	ret = _ad5766_spi_write(st, AD5766_CMD_WR_PWR_DITHER,
+			     st->dither_power_ctrl);
+	if (ret)
+		return ret;
+
 	return 0;
 }
 
@@ -395,6 +432,56 @@ static int ad5766_read(struct iio_dev *indio_dev, u8 dac, int *val)
 	return ret;
 }
 
+static ssize_t ad5766_write_ext(struct iio_dev *indio_dev,
+				 uintptr_t private,
+				 const struct iio_chan_spec *chan,
+				 const char *buf, size_t len)
+{
+	bool readin;
+	int ret;
+	struct ad5766_state *st = iio_priv(indio_dev);
+
+	switch ((u32)private) {
+	case AD5766_DITHER_PWR:
+		ret = kstrtobool(buf, &readin);
+		if (ret)
+			break;
+
+		readin = !readin;
+		st->dither_power_ctrl = (st->dither_power_ctrl &
+					 ~BIT(chan->channel)) |
+					 (readin << chan->channel);
+		ret = ad5766_write(indio_dev, AD5766_CMD_WR_PWR_DITHER,
+			     st->dither_power_ctrl);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	return ret ? ret : len;
+}
+
+static ssize_t ad5766_read_ext(struct iio_dev *indio_dev,
+			       uintptr_t private,
+			       const struct iio_chan_spec *chan,
+			       char *buf)
+{
+	int ret;
+	struct ad5766_state *st = iio_priv(indio_dev);
+
+	switch ((u32)private) {
+	case AD5766_DITHER_PWR:
+		return sprintf(buf, "%u\n", 0x01 &
+			       ~(st->dither_power_ctrl >> chan->channel));
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	return ret;
+}
 
 static int ad5766_read_avail(struct iio_dev *indio_dev,
 				 struct iio_chan_spec const *chan,
