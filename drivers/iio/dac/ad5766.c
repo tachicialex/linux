@@ -45,6 +45,13 @@ static ssize_t ad5766_read_ext(struct iio_dev *indio_dev,
 			       const struct iio_chan_spec *chan,
 			       char *buf);
 
+static int ad5766_get_dither_source(struct iio_dev *dev,
+			     const struct iio_chan_spec *chan);
+
+static int ad5766_set_dither_source(struct iio_dev *dev,
+			     const struct iio_chan_spec *chan,
+			     unsigned int mode);
+
 #define _AD5766_CHAN_EXT_INFO(_name, _what, _shared) { \
 	.name = _name, \
 	.read = ad5766_read_ext, \
@@ -57,8 +64,25 @@ enum {
 	AD5766_DITHER_PWR,
 };
 
+static const char * const ad5766_dither_sources[] = {
+	"NO_DITHER",
+	"N0",
+	"N1",
+};
+
+static const struct iio_enum ad5766_dither_source_enum = {
+	.items = ad5766_dither_sources,
+	.num_items = ARRAY_SIZE(ad5766_dither_sources),
+	.set = ad5766_set_dither_source,
+	.get = ad5766_get_dither_source,
+};
+
 static const struct iio_chan_spec_ext_info ad5766_ext_info[] = {
 	_AD5766_CHAN_EXT_INFO("dither_pwr", AD5766_DITHER_PWR, IIO_SEPARATE),
+	IIO_ENUM("dither_source", IIO_SEPARATE, &ad5766_dither_source_enum),
+	IIO_ENUM_AVAILABLE_SHARED("dither_source",
+				  IIO_SEPARATE,
+				  &ad5766_dither_source_enum),
 	{},
 };
 
@@ -136,6 +160,7 @@ struct ad5766_chip_info {
  * @dither_power_ctrl:	Power-down bit for each channel dither block (for
  *			example, D15 = DAC 15,D8 = DAC 8, and D0 = DAC 0)
  *			0 - Normal operation, 1 - Power down
+ * @dither_source:	Selects between 3 possible sources: No dither, N0, N1
  * @scale_avail:	Scale available table
  * @offset_avail:	Offest available table
  * @data:		Spi transfer buffers
@@ -149,6 +174,7 @@ struct ad5766_state {
 	enum ad5766_voltage_range	crt_range;
 	enum ad5766_voltage_range	cached_offset;
 	u16		dither_power_ctrl;
+	u32		dither_source;
 	s32		scale_avail[AD5766_VOLTAGE_RANGE_MAX][2];
 	s32		offset_avail[AD5766_VOLTAGE_RANGE_MAX][2];
 	union {
@@ -327,6 +353,17 @@ static int ad5766_default_setup(struct ad5766_state *st,
 	if (ret)
 		return ret;
 
+	st->dither_source = 0;
+	ret = _ad5766_spi_write(st, AD5766_CMD_DITHER_SIG_1,
+			  st->dither_source & 0xFFFF);
+	if (ret)
+		return ret;
+
+	ret = _ad5766_spi_write(st, AD5766_CMD_DITHER_SIG_2,
+			  (st->dither_source >> 16) & 0xFFFF);
+	if (ret)
+		return ret;
+
 	return 0;
 }
 
@@ -460,6 +497,32 @@ static ssize_t ad5766_write_ext(struct iio_dev *indio_dev,
 	}
 
 	return ret ? ret : len;
+}
+
+static int ad5766_get_dither_source(struct iio_dev *dev, const struct iio_chan_spec *chan)
+{
+	struct ad5766_state *st = iio_priv(dev);
+
+	return (st->dither_source >> (chan->channel * 2) & 0x03);
+}
+
+static int ad5766_set_dither_source(struct iio_dev *dev,
+			  const struct iio_chan_spec *chan,
+			  unsigned int mode)
+{
+	int ret;
+	struct ad5766_state *st = iio_priv(dev);
+
+	st->dither_source = (st->dither_source & ~(0x03 << (chan->channel * 2)))
+			    | (mode << (chan->channel * 2));
+
+	ret = ad5766_write(dev, AD5766_CMD_DITHER_SIG_1,
+			  st->dither_source & 0xFFFF);
+	if (ret)
+		return ret;
+
+	return ad5766_write(dev, AD5766_CMD_DITHER_SIG_2,
+			  (st->dither_source >> 16) & 0xFFFF);
 }
 
 static ssize_t ad5766_read_ext(struct iio_dev *indio_dev,
