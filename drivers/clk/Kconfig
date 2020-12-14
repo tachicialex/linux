@@ -257,15 +257,10 @@ config CLK_QORIQ
 	  This adds the clock driver support for Freescale QorIQ platforms
 	  using common clock framework.
 
-config CLK_LS1028A_PLLDIG
-        tristate "Clock driver for LS1028A Display output"
-        depends on ARCH_LAYERSCAPE || COMPILE_TEST
-        default ARCH_LAYERSCAPE
-        help
-          This driver support the Display output interfaces(LCD, DPHY) pixel clocks
-          of the QorIQ Layerscape LS1028A, as implemented TSMC CLN28HPM PLL. Not all
-          features of the PLL are currently supported by the driver. By default,
-          configured bypass mode with this PLL.
+config COMMON_CLK_ADI
+	def_bool COMMON_CLK
+	---help---
+	  Support for Analog Devices clock providers.
 
 config COMMON_CLK_XGENE
 	bool "Clock driver for APM XGene SoC"
@@ -366,6 +361,7 @@ config COMMON_CLK_FIXED_MMIO
 	  Support for Memory Mapped IO Fixed clocks
 
 source "drivers/clk/actions/Kconfig"
+source "drivers/clk/adi/Kconfig"
 source "drivers/clk/analogbits/Kconfig"
 source "drivers/clk/baikal-t1/Kconfig"
 source "drivers/clk/bcm/Kconfig"
