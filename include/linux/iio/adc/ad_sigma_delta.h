@@ -31,6 +31,7 @@ struct iio_dev;
 /**
  * struct ad_sigma_delta_info - Sigma Delta driver specific callbacks and options
  * @set_channel: Will be called to select the current channel, may be NULL.
+ * @disable_channel: Will be called to disable the current channel.
  * @set_mode: Will be called to select the current mode, may be NULL.
  * @postprocess_sample: Is called for each sampled data word, can be used to
  *		modify or drop the sample data, it, may be NULL.
@@ -41,9 +42,11 @@ struct iio_dev;
  * @data_reg: Address of the data register, if 0 the default address of 0x3 will
  *   be used.
  * @irq_flags: flags for the interrupt used by the triggered buffer
+ * @num_slots: Number of sequencer slots
  */
 struct ad_sigma_delta_info {
 	int (*set_channel)(struct ad_sigma_delta *, unsigned int channel);
+	int (*disable_channel)(struct ad_sigma_delta *, unsigned int channel);
 	int (*set_mode)(struct ad_sigma_delta *, enum ad_sigma_delta_mode mode);
 	int (*postprocess_sample)(struct ad_sigma_delta *, unsigned int raw_sample);
 	bool has_registers;
@@ -51,6 +54,7 @@ struct ad_sigma_delta_info {
 	unsigned int read_mask;
 	unsigned int data_reg;
 	unsigned long irq_flags;
+	unsigned int num_slots;
 };
 
 /**
@@ -75,6 +79,11 @@ struct ad_sigma_delta {
 	uint8_t			comm;
 
 	const struct ad_sigma_delta_info *info;
+	unsigned int		active_slots;
+	unsigned int		current_slot;
+	/* map slots to channels in order to know what to expect from devices */
+	unsigned int		*slots;
+	uint8_t			*samples_buf;
 
 	/*
 	 * DMA (thus cache coherency maintenance) requires the
@@ -92,6 +101,14 @@ static inline int ad_sigma_delta_set_channel(struct ad_sigma_delta *sd,
 {
 	if (sd->info->set_channel)
 		return sd->info->set_channel(sd, channel);
+
+	return 0;
+}
+
+static inline int ad_sigma_delta_disable_channel(struct ad_sigma_delta *sd, unsigned int channel)
+{
+	if (sd->info->disable_channel)
+		return sd->info->disable_channel(sd, channel);
 
 	return 0;
 }
