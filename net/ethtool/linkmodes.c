@@ -266,6 +266,8 @@ static const struct link_mode_info link_mode_params[] = {
 	__DEFINE_LINK_MODE_PARAMS(100, FX, Full),
 	__DEFINE_LINK_MODE_PARAMS(10, T1L, Half),
 	__DEFINE_LINK_MODE_PARAMS(10, T1L, Full),
+	__DEFINE_SPECIAL_MODE_PARAMS(2400mv),
+	__DEFINE_SPECIAL_MODE_PARAMS(1000mv),
 };
 
 const struct nla_policy ethnl_linkmodes_set_policy[] = {
