@@ -60,10 +60,6 @@
 #include "adi_adrv9001_version.h"
 #include "adi_common_error_types.h"
 
-/* gpio0 starts at 1 in the API enum */
-#define ADRV9002_DGPIO_MIN	(ADI_ADRV9001_GPIO_DIGITAL_00 - 1)
-#define ADRV9002_DGPIO_MAX	(ADI_ADRV9001_GPIO_DIGITAL_15 - 1)
-
 #define ALL_RX_CHANNEL_MASK	(ADI_ADRV9001_RX1 | ADI_ADRV9001_RX2 | \
 				 ADI_ADRV9001_ORX1 | ADI_ADRV9001_ORX2)
 
@@ -2983,34 +2979,39 @@ void adrv9002_en_delays_arm_to_ns(const struct adrv9002_rf_phy *phy,
 	d_ns->riseToOnDelay = DIV_ROUND_CLOSEST_ULL(d->riseToOnDelay * 1000000000ULL, arm_clk);
 }
 
-#define ADRV9002_OF_U32_GET_VALIDATE(dev, node, key, def, min, max,	\
-				     val, mandatory) ({			\
-	u32 tmp;							\
-	int ret, __ret = 0;						\
-	const char *__key = key;					\
-									\
-	val = def;							\
-	ret = of_property_read_u32(node, __key, &tmp);			\
-	if (!ret) {							\
-		if (tmp < (min) || tmp > (max)) {			\
-			dev_err(dev, "Invalid value(%d) for \"%s\"\n",	\
-				tmp, __key);				\
-			__ret = -EINVAL;				\
-		} else {						\
-			val = tmp;					\
-		}							\
-	} else if (mandatory) {						\
-		dev_err(dev, "Missing mandatory prop: \"%s\"\n",	\
-			__key);						\
-		__ret = ret;						\
-	}								\
-									\
-	__ret;								\
+#define ADRV9002_OF_U32_GET_VALIDATE(dev, node, key, def, min, max,		\
+				     val, mandatory) ({				\
+	u32 tmp;								\
+	int ret, __ret = 0;							\
+	const char *__key = key;						\
+										\
+	val = def;								\
+	ret = of_property_read_u32(node, __key, &tmp);				\
+	if (!ret) {								\
+		if (tmp < (min) || tmp > (max)) {				\
+			dev_err(dev, "Invalid value(%d) for \"%s\"\n",		\
+				tmp, __key);					\
+			__ret = -EINVAL;					\
+		} else {							\
+			val = tmp;						\
+		}								\
+	} else if (mandatory) {							\
+		dev_err(dev, "Failed to get mandatory prop: \"%s\", ret=%d\n",	\
+			__key, ret);						\
+		__ret = ret;							\
+	}									\
+										\
+	__ret;									\
 })
 
 #define OF_ADRV9002_PINCTL(key, def, min, max, val, mandatory) \
 	ADRV9002_OF_U32_GET_VALIDATE(&phy->spi->dev, pinctlr, key, def, min, \
 				     max, val, mandatory)
+
+#define OF_ADRV9002_DGPIO(node, key, val, mandatory) \
+	ADRV9002_OF_U32_GET_VALIDATE(&phy->spi->dev, node, key, ADI_ADRV9001_GPIO_UNASSIGNED, \
+				     ADI_ADRV9001_GPIO_DIGITAL_00, ADI_ADRV9001_GPIO_DIGITAL_15, \
+				     val, mandatory)
 
 /* as stated in adi_adrv9001_radio_types.h */
 #define EN_DELAY_MAX		(BIT(24) - 1ULL)
@@ -3092,21 +3093,13 @@ static int adrv9002_parse_tx_pin_dt(struct adrv9002_rf_phy *phy,
 		return -ENOMEM;
 	}
 
-	ret = OF_ADRV9002_PINCTL("adi,increment-pin", 0, ADRV9002_DGPIO_MIN,
-				 ADRV9002_DGPIO_MAX, tx->pin_cfg->incrementPin,
-				 true);
+	ret = OF_ADRV9002_DGPIO(pinctlr, "adi,increment-pin", tx->pin_cfg->incrementPin, true);
 	if (ret)
 		goto of_pinctrl_put;
 
-	ret = OF_ADRV9002_PINCTL("adi,decrement-pin", 0, ADRV9002_DGPIO_MIN,
-				 ADRV9002_DGPIO_MAX, tx->pin_cfg->decrementPin,
-				 true);
+	ret = OF_ADRV9002_DGPIO(pinctlr, "adi,decrement-pin", tx->pin_cfg->decrementPin, true);
 	if (ret)
 		goto of_pinctrl_put;
-
-	/* set the pins correct for the API */
-	tx->pin_cfg->incrementPin++;
-	tx->pin_cfg->decrementPin++;
 
 	ret = OF_ADRV9002_PINCTL("adi,step-size-mdB", 50, 50, 1550,
 				 tx->pin_cfg->stepSize_mdB, false);
@@ -3170,20 +3163,13 @@ static int adrv9002_parse_rx_pinctl_dt(struct adrv9002_rf_phy *phy,
 	 * Get gpios. This are mandatory properties. It makes no sense to
 	 * pin crtl gain and no pins congigured to control it!
 	 */
-	ret = OF_ADRV9002_PINCTL("adi,increment-pin", 0, ADRV9002_DGPIO_MIN,
-				 ADRV9002_DGPIO_MAX, rx->pin_cfg->incrementPin,
-				 true);
+	ret = OF_ADRV9002_DGPIO(pinctlr, "adi,increment-pin", rx->pin_cfg->incrementPin, true);
 	if (ret)
 		goto of_pinctrl_put;
 
-	ret = OF_ADRV9002_PINCTL("adi,decrement-pin", 0, ADRV9002_DGPIO_MIN,
-				 ADRV9002_DGPIO_MAX, rx->pin_cfg->decrementPin,
-				 true);
+	ret = OF_ADRV9002_DGPIO(pinctlr, "adi,decrement-pin", rx->pin_cfg->decrementPin, true);
 	if (ret)
 		goto of_pinctrl_put;
-
-	rx->pin_cfg->incrementPin++;
-	rx->pin_cfg->decrementPin++;
 
 of_pinctrl_put:
 	of_node_put(pinctlr);
@@ -3551,14 +3537,15 @@ of_gpio:
 			dev_err(&phy->spi->dev,
 				"No reg property defined for gpio\n");
 			goto of_child_put;
-		} else if (gpio >= ADI_ADRV9001_GPIO_ANALOG_11) {
+		} else if (gpio < ADI_ADRV9001_GPIO_DIGITAL_00 ||
+			   gpio > ADI_ADRV9001_GPIO_ANALOG_11) {
 			dev_err(&phy->spi->dev,
 				"Invalid gpio number: %d\n", gpio);
 			ret = -EINVAL;
 			goto of_child_put;
 		}
-		/* index 0 is not valid */
-		phy->adrv9002_gpios[idx].gpio.pin = gpio + 1;
+
+		phy->adrv9002_gpios[idx].gpio.pin = gpio;
 
 		ret = of_property_read_u32(child, "adi,signal", &signal);
 		if (ret) {
@@ -3566,7 +3553,7 @@ of_gpio:
 				"No adi,signal property defined for gpio%d\n",
 				gpio);
 			goto of_child_put;
-		} else if (signal > ADI_ADRV9001_GPIO_SIGNAL_ADC_SWITCHING_CHANNEL2) {
+		} else if (signal > ADI_ADRV9001_GPIO_SIGNAL_JTAG_CTRL) {
 			dev_err(&phy->spi->dev,
 				"Invalid gpio signal: %d\n", signal);
 			ret = -EINVAL;
