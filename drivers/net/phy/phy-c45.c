@@ -80,7 +80,14 @@ int genphy_c45_pma_setup_forced(struct phy_device *phydev)
 
 	switch (phydev->speed) {
 	case SPEED_10:
-		ctrl2 |= MDIO_PMA_CTRL2_10BT;
+		ret = phy_read_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_PMA_EXTABLE);
+		if (ret < 0)
+			return ret;
+
+		if (ret & MDIO_PMA_EXTABLE_BT1)
+			ctrl2 |= MDIO_PMA_CTRL2_BASET1;
+		else
+			ctrl2 |= MDIO_PMA_CTRL2_10BT;
 		break;
 	case SPEED_100:
 		ctrl1 |= MDIO_PMA_CTRL1_SPEED100;
@@ -118,9 +125,98 @@ int genphy_c45_pma_setup_forced(struct phy_device *phydev)
 	if (ret < 0)
 		return ret;
 
+	ret = phy_read_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_PMA_EXTABLE);
+	if (ret < 0)
+		return ret;
+
+	if (ret & MDIO_PMA_EXTABLE_BT1) {
+		int ctl = 0;
+
+		switch (phydev->master_slave_set) {
+		case MASTER_SLAVE_CFG_MASTER_PREFERRED:
+		case MASTER_SLAVE_CFG_MASTER_FORCE:
+			ctl = MDIO_PMA_PMD_BT1_CTRL_CFG_MST;
+			break;
+		case MASTER_SLAVE_CFG_SLAVE_FORCE:
+		case MASTER_SLAVE_CFG_SLAVE_PREFERRED:
+		case MASTER_SLAVE_CFG_UNKNOWN:
+		case MASTER_SLAVE_CFG_UNSUPPORTED:
+			break;
+		default:
+			phydev_warn(phydev, "Unsupported Master/Slave mode\n");
+			return -EOPNOTSUPP;
+		}
+
+		ret = phy_modify_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_PMA_PMD_BT1_CTRL,
+				     MDIO_PMA_PMD_BT1_CTRL_CFG_MST, ctl);
+		if (ret < 0)
+			return ret;
+	}
+
 	return genphy_c45_an_disable_aneg(phydev);
 }
 EXPORT_SYMBOL_GPL(genphy_c45_pma_setup_forced);
+
+/* Sets master/slave preference and supported technologies.
+ * The preference is set in the BIT(4) of BASE-T1 AN
+ * advertisement register 7.515 and whether the status
+ * is forced or not, it is set in the BIT(12) of BASE-T1
+ * AN advertisement register 7.514.
+ * Sets 10BASE-T1L Ability BIT(14) in BASE-T1 autonegotiation
+ * advertisement register [31:16] if supported.
+ */
+static int genphy_c45_baset1_an_config_aneg(struct phy_device *phydev)
+{
+	int changed = 0;
+	u16 adv_l = 0;
+	u16 adv_m = 0;
+	int ret;
+
+	switch (phydev->master_slave_set) {
+	case MASTER_SLAVE_CFG_MASTER_FORCE:
+	case MASTER_SLAVE_CFG_SLAVE_FORCE:
+		adv_l |= MDIO_AN_T1_ADV_L_FORCE_MS;
+		break;
+	case MASTER_SLAVE_CFG_MASTER_PREFERRED:
+	case MASTER_SLAVE_CFG_SLAVE_PREFERRED:
+		break;
+	default:
+		break;
+	}
+
+	switch (phydev->master_slave_set) {
+	case MASTER_SLAVE_CFG_MASTER_FORCE:
+	case MASTER_SLAVE_CFG_MASTER_PREFERRED:
+		adv_m |= MDIO_AN_T1_ADV_M_MST;
+		break;
+	case MASTER_SLAVE_CFG_SLAVE_FORCE:
+	case MASTER_SLAVE_CFG_SLAVE_PREFERRED:
+		break;
+	default:
+		break;
+	}
+
+	adv_l |= linkmode_adv_to_mii_t1_adv_l_t(phydev->advertising);
+
+	ret = phy_modify_mmd_changed(phydev, MDIO_MMD_AN, MDIO_AN_T1_ADV_L,
+				     (MDIO_AN_T1_ADV_L_FORCE_MS | MDIO_AN_T1_ADV_L_PAUSE_CAP
+				     | MDIO_AN_T1_ADV_L_PAUSE_ASYM), adv_l);
+	if (ret < 0)
+		return ret;
+	if (ret > 0)
+		changed = 1;
+
+	adv_m |= linkmode_adv_to_mii_t1_adv_m_t(phydev->advertising);
+
+	ret = phy_modify_mmd_changed(phydev, MDIO_MMD_AN, MDIO_AN_T1_ADV_M,
+				     MDIO_AN_T1_ADV_M_MST | MDIO_AN_T1_ADV_M_B10L, adv_m);
+	if (ret < 0)
+		return ret;
+	if (ret > 0)
+		changed = 1;
+
+	return changed;
+}
 
 /**
  * genphy_c45_an_config_aneg - configure advertisement registers
@@ -133,13 +229,20 @@ EXPORT_SYMBOL_GPL(genphy_c45_pma_setup_forced);
  */
 int genphy_c45_an_config_aneg(struct phy_device *phydev)
 {
-	int changed, ret;
+	int changed, ret, val;
 	u32 adv;
 
 	linkmode_and(phydev->advertising, phydev->advertising,
 		     phydev->supported);
 
 	changed = genphy_config_eee_advert(phydev);
+
+	val = phy_read_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_PMA_EXTABLE);
+	if (val < 0)
+		return val;
+
+	if (val & MDIO_PMA_EXTABLE_BT1)
+		return genphy_c45_baset1_an_config_aneg(phydev);
 
 	adv = linkmode_adv_to_mii_adv_t(phydev->advertising);
 
@@ -178,8 +281,17 @@ EXPORT_SYMBOL_GPL(genphy_c45_an_config_aneg);
  */
 int genphy_c45_an_disable_aneg(struct phy_device *phydev)
 {
+	u16 reg = MDIO_CTRL1;
+	int ret;
 
-	return phy_clear_bits_mmd(phydev, MDIO_MMD_AN, MDIO_CTRL1,
+	ret = phy_read_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_PMA_EXTABLE);
+	if (ret < 0)
+		return ret;
+
+	if (ret & MDIO_PMA_EXTABLE_BT1)
+		reg = MDIO_AN_T1_CTRL;
+
+	return phy_clear_bits_mmd(phydev, MDIO_MMD_AN, reg,
 				  MDIO_AN_CTRL1_ENABLE | MDIO_AN_CTRL1_RESTART);
 }
 EXPORT_SYMBOL_GPL(genphy_c45_an_disable_aneg);
@@ -194,7 +306,17 @@ EXPORT_SYMBOL_GPL(genphy_c45_an_disable_aneg);
  */
 int genphy_c45_restart_aneg(struct phy_device *phydev)
 {
-	return phy_set_bits_mmd(phydev, MDIO_MMD_AN, MDIO_CTRL1,
+	u16 reg = MDIO_CTRL1;
+	int ret;
+
+	ret = phy_read_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_PMA_EXTABLE);
+	if (ret < 0)
+		return ret;
+
+	if (ret & MDIO_PMA_EXTABLE_BT1)
+		reg = MDIO_AN_T1_CTRL;
+
+	return phy_set_bits_mmd(phydev, MDIO_MMD_AN, reg,
 				MDIO_AN_CTRL1_ENABLE | MDIO_AN_CTRL1_RESTART);
 }
 EXPORT_SYMBOL_GPL(genphy_c45_restart_aneg);
@@ -210,11 +332,19 @@ EXPORT_SYMBOL_GPL(genphy_c45_restart_aneg);
  */
 int genphy_c45_check_and_restart_aneg(struct phy_device *phydev, bool restart)
 {
+	u16 reg = MDIO_CTRL1;
 	int ret;
+
+	ret = phy_read_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_PMA_EXTABLE);
+	if (ret < 0)
+		return ret;
+
+	if (ret & MDIO_PMA_EXTABLE_BT1)
+		reg = MDIO_AN_T1_CTRL;
 
 	if (!restart) {
 		/* Configure and restart aneg if it wasn't set before */
-		ret = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_CTRL1);
+		ret = phy_read_mmd(phydev, MDIO_MMD_AN, reg);
 		if (ret < 0)
 			return ret;
 
@@ -242,7 +372,17 @@ EXPORT_SYMBOL_GPL(genphy_c45_check_and_restart_aneg);
  */
 int genphy_c45_aneg_done(struct phy_device *phydev)
 {
-	int val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_STAT1);
+	int reg = MDIO_STAT1;
+	int val;
+
+	val = phy_read_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_PMA_EXTABLE);
+	if (val < 0)
+		return val;
+
+	if (val & MDIO_PMA_EXTABLE_BT1)
+		reg = MDIO_AN_T1_STAT;
+
+	val = phy_read_mmd(phydev, MDIO_MMD_AN, reg);
 
 	return val < 0 ? val : val & MDIO_AN_STAT1_COMPLETE ? 1 : 0;
 }
@@ -307,6 +447,49 @@ int genphy_c45_read_link(struct phy_device *phydev)
 }
 EXPORT_SYMBOL_GPL(genphy_c45_read_link);
 
+/* Read the Clause 45 defined BASE-T1 AN (7.513) status register to check
+ * if autoneg is complete. If so read the BASE-T1 Autonegotiation
+ * Advertisement registers filling in the link partner advertisement,
+ * pause and asym_pause members in phydev.
+ */
+static int genphy_c45_baset1_read_lpa(struct phy_device *phydev)
+{
+	int val;
+
+	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_T1_STAT);
+	if (val < 0)
+		return val;
+
+	if (!(val & MDIO_AN_STAT1_COMPLETE)) {
+		linkmode_clear_bit(ETHTOOL_LINK_MODE_Autoneg_BIT, phydev->lp_advertising);
+		mii_t1_adv_l_mod_linkmode_t(phydev->lp_advertising, 0);
+		mii_t1_adv_m_mod_linkmode_t(phydev->lp_advertising, 0);
+
+		phydev->pause = 0;
+		phydev->asym_pause = 0;
+
+		return 0;
+	}
+
+	linkmode_mod_bit(ETHTOOL_LINK_MODE_Autoneg_BIT, phydev->lp_advertising, 1);
+
+	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_T1_LP_L);
+	if (val < 0)
+		return val;
+
+	mii_t1_adv_l_mod_linkmode_t(phydev->lp_advertising, val);
+	phydev->pause = val & MDIO_AN_T1_ADV_L_PAUSE_CAP ? 1 : 0;
+	phydev->asym_pause = val & MDIO_AN_T1_ADV_L_PAUSE_ASYM ? 1 : 0;
+
+	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_T1_LP_M);
+	if (val < 0)
+		return val;
+
+	mii_t1_adv_m_mod_linkmode_t(phydev->lp_advertising, val);
+
+	return 0;
+}
+
 /**
  * genphy_c45_read_lpa - read the link partner advertisement and pause
  * @phydev: target phy_device struct
@@ -320,6 +503,13 @@ EXPORT_SYMBOL_GPL(genphy_c45_read_link);
 int genphy_c45_read_lpa(struct phy_device *phydev)
 {
 	int val;
+
+	val = phy_read_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_PMA_EXTABLE);
+	if (val < 0)
+		return val;
+
+	if (val & MDIO_PMA_EXTABLE_BT1)
+		return genphy_c45_baset1_read_lpa(phydev);
 
 	val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_STAT1);
 	if (val < 0)
@@ -398,6 +588,21 @@ int genphy_c45_read_pma(struct phy_device *phydev)
 	}
 
 	phydev->duplex = DUPLEX_FULL;
+
+	val = phy_read_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_PMA_EXTABLE);
+	if (val < 0)
+		return val;
+
+	if (val & MDIO_PMA_EXTABLE_BT1) {
+		val = phy_read_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_PMA_PMD_BT1_CTRL);
+		if (val < 0)
+			return val;
+
+		if (MDIO_PMA_PMD_BT1_CTRL_CFG_MST)
+			phydev->master_slave_state = MASTER_SLAVE_STATE_MASTER;
+		else
+			phydev->master_slave_state = MASTER_SLAVE_STATE_SLAVE;
+	}
 
 	return 0;
 }
@@ -530,11 +735,66 @@ int genphy_c45_pma_read_abilities(struct phy_device *phydev)
 					 phydev->supported,
 					 val & MDIO_PMA_NG_EXTABLE_5GBT);
 		}
+
+		if (val & MDIO_PMA_EXTABLE_BT1) {
+			val = phy_read_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_PMA_PMD_BT1);
+			if (val < 0)
+				return val;
+
+			linkmode_mod_bit(ETHTOOL_LINK_MODE_10baseT1L_Full_BIT,
+					 phydev->supported,
+					 val & MDIO_PMA_PMD_BT1_B10L_ABLE);
+
+			val = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_T1_STAT);
+			if (val < 0)
+				return val;
+
+			linkmode_mod_bit(ETHTOOL_LINK_MODE_Autoneg_BIT,
+					 phydev->supported,
+					 val & MDIO_AN_STAT1_ABLE);
+		}
 	}
 
 	return 0;
 }
 EXPORT_SYMBOL_GPL(genphy_c45_pma_read_abilities);
+
+/* Read master/slave preference from registers.
+ * The preference is read from the BIT(4) of BASE-T1 AN
+ * advertisement register 7.515 and whether the preference
+ * is forced or not, it is read from BASE-T1 AN advertisement
+ * register 7.514.
+ */
+static int genphy_c45_baset1_read_status(struct phy_device *phydev)
+{
+	int ret;
+	int cfg;
+
+	phydev->master_slave_get = MASTER_SLAVE_CFG_UNKNOWN;
+	phydev->master_slave_state = MASTER_SLAVE_STATE_UNKNOWN;
+
+	ret = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_T1_ADV_L);
+	if (ret < 0)
+		return ret;
+
+	cfg = phy_read_mmd(phydev, MDIO_MMD_AN, MDIO_AN_T1_ADV_M);
+	if (cfg < 0)
+		return cfg;
+
+	if (ret & MDIO_AN_T1_ADV_L_FORCE_MS) {
+		if (cfg & MDIO_AN_T1_ADV_M_MST)
+			phydev->master_slave_get = MASTER_SLAVE_CFG_MASTER_FORCE;
+		else
+			phydev->master_slave_get = MASTER_SLAVE_CFG_SLAVE_FORCE;
+	} else {
+		if (cfg & MDIO_AN_T1_ADV_M_MST)
+			phydev->master_slave_get = MASTER_SLAVE_CFG_MASTER_PREFERRED;
+		else
+			phydev->master_slave_get = MASTER_SLAVE_CFG_SLAVE_PREFERRED;
+	}
+
+	return 0;
+}
 
 /**
  * genphy_c45_read_status - read PHY status
@@ -545,6 +805,7 @@ EXPORT_SYMBOL_GPL(genphy_c45_pma_read_abilities);
 int genphy_c45_read_status(struct phy_device *phydev)
 {
 	int ret;
+	int val;
 
 	ret = genphy_c45_read_link(phydev);
 	if (ret)
@@ -559,6 +820,16 @@ int genphy_c45_read_status(struct phy_device *phydev)
 		ret = genphy_c45_read_lpa(phydev);
 		if (ret)
 			return ret;
+
+		val = phy_read_mmd(phydev, MDIO_MMD_PMAPMD, MDIO_PMA_EXTABLE);
+		if (val < 0)
+			return val;
+
+		if (val & MDIO_PMA_EXTABLE_BT1) {
+			ret = genphy_c45_baset1_read_status(phydev);
+			if (ret < 0)
+				return ret;
+		}
 
 		phy_resolve_aneg_linkmode(phydev);
 	} else {
