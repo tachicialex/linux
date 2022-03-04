@@ -26,7 +26,6 @@
 /* Configuration Register #0 */
 #define OPEN_ALLIANCE_CONFIG0		0x0004
 #define   OPEN_ALLIANCE_CONFIG0_SYNC	BIT(15)
-#define   OPEN_ALLIANCE_CONFIG0_CSARFE	BIT(13)
 #define   OPEN_ALLIANCE_CONFIG0_ZARFE	BIT(12)
 
 /* Buffer Status Register */
@@ -128,6 +127,7 @@ enum open_alliance_stats {
 	OA_TX_CHUNKS_SENT,
 	OA_RX_END_VALID_RECEIVED,
 	OA_RX_CHUNKS_TO_FRAMES,
+	OA_CHUNKS_TRANSFERED,
 };
 
 struct open_alliance_statistic {
@@ -140,6 +140,7 @@ static const struct open_alliance_statistic open_alliance_statistics[] = {
 	{ OA_TX_CHUNKS_SENT, "TX chunks sent", },
 	{ OA_RX_END_VALID_RECEIVED, "RX end valid chunks received", },
 	{ OA_RX_CHUNKS_TO_FRAMES, "RX chunks to frames", },
+	{ OA_CHUNKS_TRANSFERED, "OA chunks transfered", },
 };
 
 struct open_alliance {
