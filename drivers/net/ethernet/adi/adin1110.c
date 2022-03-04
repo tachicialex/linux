@@ -17,6 +17,7 @@
 #include <linux/mii.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
+#include <linux/open_alliance.h>
 #include <linux/regulator/consumer.h>
 #include <linux/phy.h>
 #include <linux/property.h>
@@ -25,6 +26,10 @@
 #include <asm/unaligned.h>
 
 #define ADIN1110_PHY_ID				0x1
+
+#define ADIN1110_CONFIG0			0x04
+#define   ADIN1110_SYNC				BIT(15)
+#define   ADIN1110_CPS				GENMASK(2, 0)
 
 #define ADIN1110_CONFIG2			0x06
 #define   ADIN1110_CRC_APPEND			BIT(5)
@@ -120,6 +125,7 @@ struct adin1110_priv {
 	u64			tx_bytes;
 	struct work_struct	rx_mode_work;
 	u32			flags;
+	struct open_alliance	*oa;
 	struct sk_buff_head	txq;
 	struct mii_bus		*mii_bus;
 	struct phy_device	*phydev;
@@ -135,7 +141,7 @@ static u8 adin1110_crc_data(u8 *data, u32 len)
 	return crc8(adin1110_crc_table, data, len, 0);
 }
 
-static int adin1110_read_reg(struct adin1110_priv *priv, u16 reg, u32 *val)
+static int adin1110_read_reg_generic(struct adin1110_priv *priv, u16 reg, u32 *val)
 {
 	struct spi_transfer t[2] = {0};
 	__le16 __reg = cpu_to_le16(reg);
@@ -185,7 +191,23 @@ static int adin1110_read_reg(struct adin1110_priv *priv, u16 reg, u32 *val)
 	return ret;
 }
 
-static int adin1110_write_reg(struct adin1110_priv *priv, u16 reg, u32 val)
+static int adin1110_read_reg(struct adin1110_priv *priv, u16 reg, u32 *val)
+{
+	if (priv->oa) {
+		u8 mms;
+
+		if (reg < 0x30)
+			mms = OPEN_ALLIANCE_MMS_CTRL;
+		else
+			mms = OPEN_ALLIANCE_MMS_MAC;
+
+		return open_alliance_read_reg(priv->oa, mms, reg, val);
+	} else {
+		return adin1110_read_reg_generic(priv, reg, val);
+	}
+}
+
+static int adin1110_write_reg_generic(struct adin1110_priv *priv, u16 reg, u32 val)
 {
 	u32 header_len = ADIN1110_WR_HEADER_LEN;
 	u32 write_len = ADIN1110_REG_LEN;
@@ -207,6 +229,22 @@ static int adin1110_write_reg(struct adin1110_priv *priv, u16 reg, u32 val)
 	}
 
 	return spi_write(priv->spidev, &priv->data[0], header_len + write_len);
+}
+
+static int adin1110_write_reg(struct adin1110_priv *priv, u16 reg, u32 val)
+{
+	if (priv->oa) {
+		u8 mms;
+
+		if (reg < 0x30)
+			mms = OPEN_ALLIANCE_MMS_CTRL;
+		else
+			mms = OPEN_ALLIANCE_MMS_MAC;
+
+		return open_alliance_write_reg(priv->oa, mms, reg, val);
+	} else {
+		return adin1110_write_reg_generic(priv, reg, val);
+	}
 }
 
 static int adin1110_set_bits(struct adin1110_priv *priv, u16 reg, unsigned long mask,
@@ -468,6 +506,36 @@ static void adin1110_read_frames(struct adin1110_priv *priv)
 	}
 }
 
+static void adin1110_clear_irqs(struct adin1110_priv *priv)
+{
+	/* clear IRQ sources */
+	adin1110_write_reg(priv, ADIN1110_STATUS0, ADIN1110_CLEAR_STATUS0);
+	adin1110_write_reg(priv, ADIN1110_STATUS1, ADIN1110_CLEAR_STATUS1);
+}
+
+static int adin1110_get_tx_space(struct adin1110_priv *priv, u32 *tx_space)
+{
+	u32 val;
+	int ret;
+
+	if (priv->oa) {
+		ret = adin1110_read_reg(priv, OPEN_ALLIANCE_BUFSTS, &val);
+		if (ret < 0)
+			return ret;
+
+		val = FIELD_GET(OPEN_ALLIANCE_BUFSTS_TXC, val);
+		*tx_space = val * priv->oa->chunk_size;
+	} else {
+		ret = adin1110_read_reg(priv, ADIN1110_TX_SPACE, &val);
+		if (ret < 0)
+			return ret;
+
+		*tx_space = val;
+	}
+
+	return 0;
+}
+
 static irqreturn_t adin1110_irq(int irq, void *p)
 {
 	struct adin1110_priv *priv = p;
@@ -477,12 +545,27 @@ static irqreturn_t adin1110_irq(int irq, void *p)
 
 	mutex_lock(&priv->lock);
 
+	if (priv->oa) {
+		open_alliance_read_rxb(priv->oa);
+		adin1110_get_tx_space(priv, &val);
+		priv->tx_space = val;
+
+		adin1110_clear_irqs(priv);
+
+		mutex_unlock(&priv->lock);
+
+		if (priv->tx_space > 0)
+			netif_wake_queue(priv->netdev);
+
+		return IRQ_HANDLED;
+	}
+
 	adin1110_read_reg(priv, ADIN1110_STATUS1, &status1);
 
 	if (priv->append_crc && (status1 & ADIN1110_SPI_ERR))
 		netdev_warn(priv->netdev, "SPI CRC error on write.\n");
 
-	ret = adin1110_read_reg(priv, ADIN1110_TX_SPACE, &val);
+	ret = adin1110_get_tx_space(priv, &val);
 	if (ret < 0) {
 		mutex_unlock(&priv->lock);
 
@@ -494,9 +577,7 @@ static irqreturn_t adin1110_irq(int irq, void *p)
 	if (status1 & ADIN1110_RX_RDY)
 		adin1110_read_frames(priv);
 
-	/* clear IRQ sources */
-	adin1110_write_reg(priv, ADIN1110_STATUS0, ADIN1110_CLEAR_STATUS0);
-	adin1110_write_reg(priv, ADIN1110_STATUS1, ADIN1110_CLEAR_STATUS1);
+	adin1110_clear_irqs(priv);
 
 	mutex_unlock(&priv->lock);
 
@@ -671,7 +752,7 @@ static int adin1110_net_open(struct net_device *net_dev)
 		return ret;
 	}
 
-	ret = adin1110_read_reg(priv, ADIN1110_TX_SPACE, &val);
+	ret = adin1110_get_tx_space(priv, &val);
 	if (ret < 0) {
 		netdev_err(net_dev, "Failed to read TX FIFO space: %d\n", ret);
 		mutex_unlock(&priv->lock);
@@ -681,6 +762,13 @@ static int adin1110_net_open(struct net_device *net_dev)
 	priv->tx_space = val;
 
 	ret = adin1110_init_mac(priv);
+	if (ret < 0) {
+		mutex_unlock(&priv->lock);
+		return ret;
+	}
+
+	ret = adin1110_set_bits(priv, ADIN1110_CONFIG0, ADIN1110_SYNC,
+				ADIN1110_SYNC);
 	if (ret < 0)
 		return ret;
 
@@ -731,7 +819,10 @@ static void adin1110_tx_work(struct work_struct *work)
 		last = skb_queue_empty(&priv->txq);
 
 		if (txb) {
-			ret = adin1110_write_fifo(priv, txb);
+			if (priv->oa)
+				ret = open_alliance_write_txb(priv->oa, txb, 0);
+			else
+				ret = adin1110_write_fifo(priv, txb);
 			if (ret < 0)
 				netdev_err(priv->netdev, "Frame write error: %d\n", ret);
 
@@ -873,6 +964,8 @@ static int adin1110_probe(struct spi_device *spi)
 		return -ENOMEM;
 
 	priv = netdev_priv(netdev);
+	memset(priv, 0, sizeof(struct adin1110_priv));
+
 	priv->spidev = spi;
 	priv->netdev = netdev;
 	spi->bits_per_word = 8;
@@ -885,6 +978,13 @@ static int adin1110_probe(struct spi_device *spi)
 	INIT_WORK(&priv->rx_mode_work, adin1110_rx_mode_work);
 
 	fwnode = dev_fwnode(dev);
+
+	if (fwnode_property_present(fwnode, "open-alliance")) {
+		priv->oa = open_alliance_init(priv->spidev, netdev,
+					      1, BIT(0));
+		if (IS_ERR(priv->oa))
+			return PTR_ERR(priv->oa);
+	}
 
 	/* use of CRC on control and data transactions is pin dependent */
 	if (fwnode_property_present(fwnode, "adi,spi-crc")) {
@@ -947,6 +1047,13 @@ static int adin1110_probe(struct spi_device *spi)
 static int adin1110_remove(struct spi_device *spi)
 {
 	struct adin1110_priv *priv = dev_get_drvdata(&spi->dev);
+	int ret;
+
+	if (priv->oa) {
+		ret = open_alliance_remove(priv->oa);
+		if (ret < 0)
+			return ret;
+	}
 
 	adin1110_unregister_mdiobus(priv);
 
