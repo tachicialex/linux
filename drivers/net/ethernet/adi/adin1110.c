@@ -788,13 +788,10 @@ static int adin1110_net_open(struct net_device *net_dev)
 	mutex_lock(&priv->lock);
 
 	/* Configure MAC to compute and append the FCS itself.
-	 * If ADIN2111 configure MAC to forward unknown host to other port.
+	 * Disable forwaring of unknown hosts to the other port.
 	 */
-	val = ADIN1110_CRC_APPEND;
-	if (priv->cfg->id == ADIN2111_MAC)
-		val |= ADIN211_FWD_UNK2PORT;
-
-	ret = adin1110_set_bits(priv, ADIN1110_CONFIG2, val, val);
+	ret = adin1110_set_bits(priv, ADIN1110_CONFIG2, ADIN1110_CRC_APPEND | ADIN211_FWD_UNK2PORT,
+				ADIN1110_CRC_APPEND);
 	if (ret < 0) {
 		mutex_unlock(&priv->lock);
 		return ret;
