@@ -20,8 +20,10 @@
 #include <linux/regulator/consumer.h>
 #include <linux/phy.h>
 #include <linux/property.h>
+#include <linux/rtnetlink.h>
 #include <linux/spi/spi.h>
 
+#include <net/netlink.h>
 #include <asm/unaligned.h>
 
 #define ADIN1110_PHY_ID				0x1
@@ -121,12 +123,20 @@
 #define ADIN1110_TX_SPACE_MAX			0x0FFF
 
 #define ADIN_MAC_MAX_PORTS			2
+#define ADIN_MAC_FDB_MAX_ENTRIES		12
 
 #define ADIN_MAC_MULTICAST_ADDR_SLOT		0
 #define ADIN_MAC_ADDR_SLOT			1
 #define ADIN_MAC_BROADCAST_ADDR_SLOT		2
+#define ADIN_MAC_FDB_ENTRY_ADDR_SLOT		3
 
 DECLARE_CRC8_TABLE(adin1110_crc_table);
+
+struct adin1110_mac_entry {
+	u8	mac[ETH_ALEN];
+	u8	mac_slot;
+	u8	port_nr;
+};
 
 enum adin1110_chips_id {
 	ADIN1110_MAC = 0,
@@ -748,6 +758,111 @@ static void adin1110_set_rx_mode(struct net_device *dev)
 	spin_unlock(&priv->state_lock);
 }
 
+static int adin1110_read_mac_entry(struct adin1110_priv *priv, struct adin1110_mac_entry *entry,
+				   u8 slot)
+{
+	u32 offset = (slot + ADIN_MAC_FDB_ENTRY_ADDR_SLOT) * 2;
+	int ret;
+	u32 val;
+
+	ret = adin1110_read_reg(priv, ADIN1110_MAC_ADDR_FILTER_UPR + offset, &val);
+	if (ret < 0)
+		return ret;
+
+	if (val & ADIN1110_MAC_ADDR_APPLY2PORT)
+		entry->port_nr = 1;
+
+	if (val & ADIN2111_MAC_ADDR_APPLY2PORT2)
+		entry->port_nr = 0;
+
+	put_unaligned_be16(val, &entry->mac[0]);
+
+	ret = adin1110_read_reg(priv, ADIN1110_MAC_ADDR_FILTER_LWR + offset, &val);
+	if (ret < 0)
+		return ret;
+
+	put_unaligned_be32(val, &entry->mac[2]);
+	entry->mac_slot = slot;
+
+	return ret;
+}
+
+static int adin1110_fdb_add(struct ndmsg *ndm, struct nlattr *tb[], struct net_device *net_dev,
+			    const unsigned char *addr, u16 vid, u16 flags,
+			    struct netlink_ext_ack *extack)
+{
+	struct adin1110_port_priv *port_priv = netdev_priv(net_dev);
+	struct adin1110_priv *priv = port_priv->priv;
+	int port = port_priv->nr;
+
+	// return adin1110_fdb_add(ocelot, port, addr, vid);
+	pr_info("DEBUG: ADIN2111: PORT %d: add fdb entry.\n", port);
+	return 0;
+}
+
+static int adin1110_fdb_delete(struct ndmsg *ndm, struct nlattr *tb[], struct net_device *net_dev,
+			    const unsigned char *addr, u16 vid)
+{
+	struct adin1110_port_priv *port_priv = netdev_priv(net_dev);
+	struct adin1110_priv *priv = port_priv->priv;
+	int port = port_priv->nr;
+
+	// return adin1110_fdb_del(ocelot, port, addr, vid);
+	pr_info("DEBUG: ADIN2111: PORT %d: delete fdb entry.\n", port);
+	return 0;
+}
+
+static int adin1110_fdb_dump(struct sk_buff *skb, struct netlink_callback *cb,
+			     struct net_device *net_dev, struct net_device *filter_dev, int *idx)
+{
+	struct adin1110_port_priv *port_priv = netdev_priv(net_dev);
+	struct adin1110_priv *priv = port_priv->priv;
+	struct adin1110_mac_entry entry;
+	int port = port_priv->nr;
+	struct nlmsghdr *nlh;
+	struct ndmsg *ndm;
+	int ret;
+	int i;
+
+	pr_info("DEBUG: ADIN2111: PORT %d: dump fdb.\n", port);
+
+	*idx = 0;
+	for (i = 0; i < ADIN_MAC_FDB_MAX_ENTRIES; i++) {
+
+		mutex_lock(&priv->lock);
+		ret = adin1110_read_mac_entry(priv, &entry, i);
+		mutex_unlock(&priv->lock);
+		if (ret < 0)
+			return ret;
+
+		if (entry.port_nr == port) {
+			nlh = nlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
+					RTM_NEWNEIGH, sizeof(*ndm), NLM_F_MULTI);
+			if (!nlh)
+				return -EMSGSIZE;
+
+			ndm = nlmsg_data(nlh);
+			ndm->ndm_family  = AF_BRIDGE;
+			ndm->ndm_pad1    = 0;
+			ndm->ndm_pad2    = 0;
+			ndm->ndm_flags   = NTF_SELF;
+			ndm->ndm_type    = 0;
+			ndm->ndm_ifindex = net_dev->ifindex;
+			ndm->ndm_state   = NUD_NOARP;
+
+			if (nla_put(skb, NDA_LLADDR, ETH_ALEN, entry.mac)) {
+				nlmsg_cancel(skb, nlh);
+				return -EMSGSIZE;
+			}
+
+			nlmsg_end(skb, nlh);
+			*idx += 1;
+		}
+	}
+
+	return 0;
+}
+
 static int adin1110_init_mac(struct adin1110_port_priv *port_priv)
 {
 	struct net_device *netdev = port_priv->netdev;
@@ -967,6 +1082,9 @@ static const struct net_device_ops adin1110_netdev_ops = {
 	.ndo_start_xmit		= adin1110_start_xmit,
 	.ndo_set_mac_address	= adin1110_set_mac_address,
 	.ndo_set_rx_mode	= adin1110_set_rx_mode,
+	.ndo_fdb_add		= adin1110_fdb_add,
+	.ndo_fdb_del		= adin1110_fdb_delete,
+	.ndo_fdb_dump		= adin1110_fdb_dump,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_get_stats64	= adin1110_ndo_get_stats64,
 	.ndo_get_port_parent_id	= adin1110_port_get_port_parent_id,
@@ -1061,6 +1179,8 @@ static int adin1110_probe_netdevs(struct adin1110_priv *priv)
 		netdev->netdev_ops = &adin1110_netdev_ops;
 		netdev->ethtool_ops = &adin1110_ethtool_ops;
 		netdev->priv_flags |= IFF_UNICAST_FLT;
+		netdev->hw_features |= NETIF_F_HW_L2FW_DOFFLOAD;
+		netdev->features |= NETIF_F_HW_L2FW_DOFFLOAD;
 
 		switch (priv->cfg->id) {
 		case ADIN1110_MAC:
