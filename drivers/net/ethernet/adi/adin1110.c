@@ -160,6 +160,8 @@ struct adin1110_priv {
 	struct mutex			lock; /* protect spi */
 	spinlock_t			state_lock; /* protect RX mode */
 	struct mii_bus			*mii_bus;
+	struct napi_struct		napi;
+	bool				napi_en;
 	struct spi_device		*spidev;
 	bool				append_crc;
 	struct adin1110_cfg		*cfg;
@@ -365,7 +367,7 @@ static int adin1110_read_fifo(struct adin1110_port_priv *port_priv)
 
 	rxb->protocol = eth_type_trans(rxb, port_priv->netdev);
 
-	netif_rx_ni(rxb);
+	netif_receive_skb(rxb);
 
 	port_priv->rx_bytes += frame_size - ADIN1110_FRAME_HEADER_LEN;
 
@@ -543,26 +545,6 @@ static bool adin1110_port_rx_ready(struct adin1110_port_priv *port_priv, u32 sta
 		return !!(status & ADIN2111_P2_RX_RDY);
 }
 
-static void adin1110_read_frames(struct adin1110_port_priv *port_priv)
-{
-	struct adin1110_priv *priv = port_priv->priv;
-	u32 status1;
-	int ret;
-
-	while (1) {
-		ret = adin1110_read_reg(priv, ADIN1110_STATUS1, &status1);
-		if (ret < 0)
-			return;
-
-		if (!adin1110_port_rx_ready(port_priv, status1))
-			break;
-
-		ret = adin1110_read_fifo(port_priv);
-		if (ret < 0)
-			return;
-	}
-}
-
 static void adin1110_wake_queues(struct adin1110_priv *priv)
 {
 	int i;
@@ -571,9 +553,27 @@ static void adin1110_wake_queues(struct adin1110_priv *priv)
 		netif_wake_queue(priv->ports[i]->netdev);
 }
 
+static int adin1110_rx_irq_cfg(struct adin1110_priv *priv, bool masked)
+{
+	u32 mask;
+	int ret;
+
+	mask = ADIN1110_RX_RDY_IRQ;
+	if (priv->cfg->id == ADIN2111_MAC)
+		mask |= ADIN2111_RX_RDY_IRQ;
+
+	ret = adin1110_set_bits(priv, ADIN1110_IMASK1, mask, masked ? mask : 0);
+	if (ret < 0)
+		return ret;
+
+	return 0;
+}
+
 static irqreturn_t adin1110_irq(int irq, void *p)
 {
+	struct adin1110_port_priv *port_priv;
 	struct adin1110_priv *priv = p;
+	bool schedule = false;
 	u32 status1;
 	u32 val;
 	int ret;
@@ -586,6 +586,24 @@ static irqreturn_t adin1110_irq(int irq, void *p)
 	if (priv->append_crc && (status1 & ADIN1110_SPI_ERR))
 		dev_warn(&priv->spidev->dev, "SPI CRC error on write.\n");
 
+	/* If there are frames to be read from any port, disable further RX ready
+	 * IRQs and ask NAPI to poll us.
+	 */
+	for (i = 0; i < priv->cfg->ports_nr; i++) {
+		port_priv = priv->ports[i];
+
+		if (adin1110_port_rx_ready(port_priv, status1)) {
+			ret = adin1110_rx_irq_cfg(priv, true);
+			if (ret < 0) {
+				mutex_unlock(&priv->lock);
+				return IRQ_HANDLED;
+			}
+
+			schedule = true;
+			break;
+		}
+	}
+
 	ret = adin1110_read_reg(priv, ADIN1110_TX_SPACE, &val);
 	if (ret < 0) {
 		mutex_unlock(&priv->lock);
@@ -595,21 +613,83 @@ static irqreturn_t adin1110_irq(int irq, void *p)
 	/* TX FIFO space is expressed in half-words */
 	priv->tx_space = 2 * val;
 
-	for (i = 0; i < priv->cfg->ports_nr; i++) {
-		if (adin1110_port_rx_ready(priv->ports[i], status1))
-			adin1110_read_frames(priv->ports[i]);
-	}
-
 	/* clear IRQ sources */
 	ret = adin1110_write_reg(priv, ADIN1110_STATUS0, ADIN1110_CLEAR_STATUS0);
+	if (ret < 0) {
+		mutex_unlock(&priv->lock);
+		return IRQ_HANDLED;
+	}
+
 	ret = adin1110_write_reg(priv, ADIN1110_STATUS1, priv->irq_mask);
+	if (ret < 0) {
+		mutex_unlock(&priv->lock);
+		return IRQ_HANDLED;
+	}
 
 	mutex_unlock(&priv->lock);
+
+	if (schedule)
+		napi_schedule(&priv->napi);
 
 	if (priv->tx_space > 0)
 		adin1110_wake_queues(priv);
 
 	return IRQ_HANDLED;
+}
+
+static int adin1110_napi_poll(struct napi_struct *napi, int budget) {
+	struct adin1110_port_priv *port_priv = netdev_priv(napi->dev);
+	struct adin1110_priv *priv = port_priv->priv;
+	int frames_sent = 0;
+	u32 status1;
+	int ret;
+	int i;
+
+	pr_info("DEBUG: %s:%d frames_sent = %d, budget = %d\n", __func__, __LINE__, frames_sent, budget);
+
+	mutex_lock(&priv->lock);
+
+	for (i = 0; i < priv->cfg->ports_nr; i++) {
+		port_priv = priv->ports[i];
+
+		while (1) {
+			ret = adin1110_read_reg(priv, ADIN1110_STATUS1, &status1);
+			if (ret < 0) {
+				mutex_unlock(&priv->lock);
+				return ret;
+			}
+
+			if (!adin1110_port_rx_ready(port_priv, status1))
+				break;
+
+			ret = adin1110_read_fifo(port_priv);
+			if (ret < 0) {
+				mutex_unlock(&priv->lock);
+				return ret;
+			}
+
+			frames_sent++;
+			budget--;
+
+			if (!budget)
+				break;
+		}
+	}
+
+	pr_info("DEBUG: %s:%d frames_sent = %d, budget = %d\n", __func__, __LINE__, frames_sent, budget);
+
+	if (napi_complete_done(&priv->napi, frames_sent) && (budget > 0)) {
+		pr_info("DEBUG: IRQs have been enabled.\n");
+		ret = adin1110_rx_irq_cfg(priv, false);
+		if (ret < 0) {
+			mutex_unlock(&priv->lock);
+			return ret;
+		}
+	}
+
+	mutex_unlock(&priv->lock);
+
+	return frames_sent;
 }
 
 /* ADIN1110 can filter up to 16 MAC addresses, mac_nr here is the slot used */
@@ -782,6 +862,21 @@ static int adin1110_init_mac(struct adin1110_port_priv *port_priv)
 	return 0;
 }
 
+static void adin1110_set_napi(struct adin1110_priv *priv, bool en)
+{
+	mutex_lock(&priv->lock);
+
+	if (en && !priv->napi_en) {
+		napi_enable(&priv->napi);
+		priv->napi_en = true;
+	} else if (!en && priv->napi_en) {
+		napi_disable(&priv->napi);
+		priv->napi_en = false;
+	}
+
+	mutex_unlock(&priv->lock);
+}
+
 static int adin1110_net_open(struct net_device *net_dev)
 {
 	struct adin1110_port_priv *port_priv = netdev_priv(net_dev);
@@ -841,7 +936,7 @@ static int adin1110_net_open(struct net_device *net_dev)
 	mutex_unlock(&priv->lock);
 
 	phy_start(port_priv->phydev);
-
+	adin1110_set_napi(priv, true);
 	netif_start_queue(net_dev);
 
 	return ret;
@@ -850,9 +945,11 @@ static int adin1110_net_open(struct net_device *net_dev)
 static int adin1110_net_stop(struct net_device *net_dev)
 {
 	struct adin1110_port_priv *port_priv = netdev_priv(net_dev);
+	struct adin1110_priv *priv = port_priv->priv;
 
 	netif_stop_queue(port_priv->netdev);
 	flush_work(&port_priv->tx_work);
+	adin1110_set_napi(priv, false);
 	phy_stop(port_priv->phydev);
 
 	return 0;
@@ -1031,14 +1128,18 @@ static void adin1110_disconnect_phy(void *data)
 	phy_disconnect(data);
 }
 
-static int adin1110_probe_netdevs(struct adin1110_priv *priv)
+static void adin1110_netif_napi_del(void *data)
+{
+	netif_napi_del(data);
+}
+
+static int adin1110_init_netdevs(struct adin1110_priv *priv)
 {
 	struct device *dev = &priv->spidev->dev;
 	struct adin1110_port_priv *port_priv;
 	struct net_device *netdev;
 	const u8 *mac_addr;
 	u8 mac[ETH_ALEN];
-	int ret;
 	int i;
 
 	for (i = 0; i < priv->cfg->ports_nr; i++) {
@@ -1087,6 +1188,24 @@ static int adin1110_probe_netdevs(struct adin1110_priv *priv)
 		default:
 			return -EINVAL;
 		}
+	}
+
+	netif_napi_add(priv->ports[0]->netdev, &priv->napi, adin1110_napi_poll, NAPI_POLL_WEIGHT);
+
+	return devm_add_action_or_reset(dev, adin1110_netif_napi_del, &priv->napi);
+}
+
+static int adin1110_register_netdevs(struct adin1110_priv *priv)
+{
+	struct device *dev = &priv->spidev->dev;
+	struct adin1110_port_priv *port_priv;
+	struct net_device *netdev;
+	int ret;
+	int i;
+
+	for (i = 0; i < priv->cfg->ports_nr; i++) {
+		port_priv = priv->ports[i];
+		netdev = port_priv->netdev;
 
 		ret = devm_register_netdev(dev, netdev);
 		if (ret < 0) {
@@ -1140,6 +1259,10 @@ static int adin1110_probe(struct spi_device *spi)
 	if (priv->append_crc)
 		crc8_populate_msb(adin1110_crc_table, 0x7);
 
+	ret = adin1110_init_netdevs(priv);
+	if (ret < 0)
+		return ret;
+
 	ret = adin1110_check_spi(priv);
 	if (ret < 0) {
 		dev_err(dev, "SPI read failed: %d\n", ret);
@@ -1152,7 +1275,7 @@ static int adin1110_probe(struct spi_device *spi)
 		return ret;
 	}
 
-	return adin1110_probe_netdevs(priv);
+	return adin1110_register_netdevs(priv);
 }
 
 static const struct of_device_id adin1110_match_table[] = {
