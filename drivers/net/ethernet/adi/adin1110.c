@@ -736,8 +736,12 @@ static void adin1110_rx_mode_work(struct work_struct *work)
 
 	mutex_lock(&priv->lock);
 
-	adin1110_set_bits(priv, ADIN1110_CONFIG2, mask,
-			  (port_priv->flags & IFF_PROMISC) ? mask : 0);
+	/* Bridge core sets IFF_PROMISC on all interfaces and all frames would be
+	 * forwarded to the CPU over SPI. Allow this only on the single port MAC.
+	 */
+	if (priv->cfg->id == ADIN1110_MAC)
+		adin1110_set_bits(priv, ADIN1110_CONFIG2, mask,
+				  (port_priv->flags & IFF_PROMISC) ? mask : 0);
 
 	adin1110_multicast_filter(port_priv, ADIN_MAC_MULTICAST_ADDR_SLOT,
 				  !!(port_priv->flags & IFF_ALLMULTI));
