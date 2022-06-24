@@ -26,11 +26,14 @@
 
 #define ADIN1110_PHY_ID				0x1
 
+#define ADIN1110_RESET				0x03
+#define   ADIN1110_SWRESET			BIT(0)
+
 #define ADIN1110_CONFIG1			0x04
 #define   ADIN1110_CONFIG1_SYNC			BIT(15)
 
 #define ADIN1110_CONFIG2			0x06
-#define   ADIN211_FWD_UNK2PORT			GENMASK(14, 13)
+#define   ADIN2111_FWD_UNK2PORT			GENMASK(14, 13)
 #define   ADIN2111_P2_FWD_UNK2HOST		BIT(12)
 #define   ADIN1110_CRC_APPEND			BIT(5)
 #define   ADIN1110_FWD_UNK2HOST			BIT(2)
@@ -145,6 +148,7 @@ struct adin1110_cfg {
 struct adin1110_port_priv {
 	struct adin1110_priv		*priv;
 	struct net_device		*netdev;
+	struct net_device		*bridge;
 	struct phy_device		*phydev;
 	struct work_struct		tx_work;
 	u64				rx_bytes;
@@ -159,6 +163,7 @@ struct adin1110_port_priv {
 struct adin1110_priv {
 	struct mutex			lock; /* protect spi */
 	spinlock_t			state_lock; /* protect RX mode */
+	bool				forwarding;
 	struct mii_bus			*mii_bus;
 	struct spi_device		*spidev;
 	bool				append_crc;
@@ -356,7 +361,7 @@ static int adin1110_read_fifo(struct adin1110_port_priv *port_priv)
 	}
 
 	/* Already forwarded to the other port if it did not match any MAC Addresses. */
-	if (priv->cfg->id == ADIN2111_MAC)
+	if (priv->forwarding)
 		rxb->offload_fwd_mark = 1;
 
 	skb_put(rxb, frame_size_no_fcs);
@@ -626,8 +631,7 @@ static int adin1110_write_mac_address(struct adin1110_port_priv *port_priv, int 
 	if (priv->cfg->id == ADIN2111_MAC) {
 		port_rules |= ADIN2111_MAC_ADDR_APPLY2PORT2;
 
-		/* Broadcast and multicast should also be forwarded to the other port */
-		if (mac_nr != ADIN_MAC_ADDR_SLOT)
+		if (mac_nr != ADIN_MAC_ADDR_SLOT && priv->forwarding)
 			port_rules |= ADIN2111_MAC_ADDR_TO_OTHER_PORT;
 	}
 
@@ -795,14 +799,8 @@ static int adin1110_net_open(struct net_device *net_dev)
 
 	mutex_lock(&priv->lock);
 
-	/* Configure MAC to compute and append the FCS itself.
-	 * If ADIN2111 configure MAC to forward unknown host to other port.
-	 */
-	val = ADIN1110_CRC_APPEND;
-	if (priv->cfg->id == ADIN2111_MAC)
-		val |= ADIN211_FWD_UNK2PORT;
-
-	ret = adin1110_set_bits(priv, ADIN1110_CONFIG2, val, val);
+	/* Configure MAC to compute and append the FCS itself. */
+	ret = adin1110_set_bits(priv, ADIN1110_CONFIG2, ADIN1110_CRC_APPEND, ADIN1110_CRC_APPEND);
 	if (ret < 0) {
 		mutex_unlock(&priv->lock);
 		return ret;
@@ -1035,6 +1033,132 @@ static void adin1110_disconnect_phy(void *data)
 	phy_disconnect(data);
 }
 
+static void adin1110_unregister_notifier(void *data)
+{
+	unregister_netdevice_notifier(data);
+}
+
+static int adin1110_hw_forwarding(struct adin1110_priv *priv, bool enable)
+{
+	int mac_nr;
+	int ret;
+
+	mutex_lock(&priv->lock);
+
+	/* Configure MAC to forward unknown host to other port. */
+	ret = adin1110_set_bits(priv, ADIN1110_CONFIG2, ADIN2111_FWD_UNK2PORT,
+				enable ? ADIN2111_FWD_UNK2PORT : 0);
+	if (ret < 0) {
+		mutex_unlock(&priv->lock);
+		return ret;
+	}
+
+	/* Broadcast and multicast should also be forwarded to the other port */
+	for (mac_nr = 0; mac_nr <= ADIN_MAC_BROADCAST_ADDR_SLOT; mac_nr++) {
+		u32 offset = mac_nr * 2;
+		u32 port_rules;
+		u32 port_rules_mask;
+		u32 val;
+
+		if (mac_nr == ADIN_MAC_ADDR_SLOT)
+			continue;
+
+		port_rules_mask = ADIN1110_MAC_ADDR_APPLY2PORT | ADIN2111_MAC_ADDR_APPLY2PORT2;
+		port_rules = port_rules_mask;
+		port_rules_mask |= ADIN2111_MAC_ADDR_TO_OTHER_PORT;
+		if (enable)
+			port_rules |= ADIN2111_MAC_ADDR_TO_OTHER_PORT;
+
+		/* tell MAC to forward this DA to host */
+		val = port_rules | ADIN1110_MAC_ADDR_TO_HOST;
+		ret = adin1110_set_bits(priv, ADIN1110_MAC_ADDR_FILTER_UPR + offset,
+					port_rules_mask, port_rules);
+		if (ret < 0) {
+			mutex_unlock(&priv->lock);
+			return ret;
+		}
+	}
+
+	ret = adin1110_set_bits(priv, ADIN1110_CONFIG2, ADIN2111_FWD_UNK2PORT,
+				ADIN2111_FWD_UNK2PORT);
+	if (ret < 0) {
+		mutex_unlock(&priv->lock);
+		return ret;
+	}
+
+	ret = adin1110_set_bits(priv, ADIN1110_CONFIG1, ADIN1110_CONFIG1_SYNC,
+				ADIN1110_CONFIG1_SYNC);
+
+	mutex_unlock(&priv->lock);
+
+	if (ret < 0)
+		return ret;
+
+	priv->forwarding = enable;
+
+	return ret;
+}
+
+static int adin1110_port_bridge_join(struct adin1110_port_priv *port_priv,
+				     struct net_device *bridge)
+{
+	struct adin1110_priv *priv = port_priv->priv;
+	int ret = 0;
+
+	/* Having the same port belong to multiple bridges is not supported */
+	if (port_priv->bridge && port_priv->bridge != bridge)
+		return -ENOTSUPP;
+
+	port_priv->bridge = bridge;
+
+	/* If other port joined same bridge, allow forwarding between ports */
+	if (priv->ports[0]->bridge == priv->ports[1]->bridge)
+		ret = adin1110_hw_forwarding(priv, true);
+
+	return ret;
+}
+
+static int adin1110_port_bridge_leave(struct adin1110_port_priv *port_priv,
+				      struct net_device *bridge)
+{
+	struct adin1110_priv *priv = port_priv->priv;
+	int ret = 0;
+
+	if (priv->ports[0]->bridge == priv->ports[1]->bridge)
+		ret = adin1110_hw_forwarding(priv, false);
+
+	port_priv->bridge = NULL;
+
+	return ret;
+}
+
+static int adin1110_netdevice_event(struct notifier_block *unused, unsigned long event, void *ptr)
+{
+	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
+	struct adin1110_port_priv *port_priv = netdev_priv(dev);
+	struct netdev_notifier_changeupper_info *info = ptr;
+	int ret = 0;
+
+	switch (event) {
+	case NETDEV_CHANGEUPPER:
+		if (netif_is_bridge_master(info->upper_dev)) {
+			if (info->linking)
+				ret = adin1110_port_bridge_join(port_priv, info->upper_dev);
+			else
+				ret = adin1110_port_bridge_leave(port_priv, info->upper_dev);
+		}
+		break;
+	default:
+		break;
+	}
+
+	return notifier_from_errno(ret);
+}
+
+struct notifier_block adin1110_netdevice_nb __read_mostly = {
+	.notifier_call = adin1110_netdevice_event,
+};
+
 static int adin1110_probe_netdevs(struct adin1110_priv *priv)
 {
 	struct device *dev = &priv->spidev->dev;
@@ -1080,19 +1204,6 @@ static int adin1110_probe_netdevs(struct adin1110_priv *priv)
 		netdev->priv_flags |= IFF_UNICAST_FLT;
 		netdev->features |= NETIF_F_NETNS_LOCAL;
 
-		switch (priv->cfg->id) {
-		case ADIN1110_MAC:
-			snprintf(port_priv->netdev->name, IFNAMSIZ, "%s-%u", priv->cfg->name,
-				 priv->spidev->chip_select);
-			break;
-		case ADIN2111_MAC:
-			snprintf(port_priv->netdev->name, IFNAMSIZ, "%s-%u-p%d", priv->cfg->name,
-				 priv->spidev->chip_select, i);
-			break;
-		default:
-			return -EINVAL;
-		}
-
 		ret = devm_register_netdev(dev, netdev);
 		if (ret < 0) {
 			dev_err(dev, "failed to register network device\n");
@@ -1118,8 +1229,16 @@ static int adin1110_probe_netdevs(struct adin1110_priv *priv)
 	}
 
 	/* ADIN1110 INT_N pin will be used to signal the host */
-	return devm_request_threaded_irq(dev, priv->spidev->irq, NULL, adin1110_irq,
-					 IRQF_TRIGGER_LOW | IRQF_ONESHOT, dev_name(dev), priv);
+	ret = devm_request_threaded_irq(dev, priv->spidev->irq, NULL, adin1110_irq,
+					IRQF_TRIGGER_LOW | IRQF_ONESHOT, dev_name(dev), priv);
+	if (ret < 0)
+		return ret;
+
+	ret = register_netdevice_notifier(&adin1110_netdevice_nb);
+	if (ret < 0)
+		return ret;
+
+	return devm_add_action_or_reset(dev, adin1110_unregister_notifier, &adin1110_netdevice_nb);
 }
 
 static int adin1110_probe(struct spi_device *spi)
@@ -1150,6 +1269,10 @@ static int adin1110_probe(struct spi_device *spi)
 		dev_err(dev, "SPI read failed: %d\n", ret);
 		return ret;
 	}
+
+	ret = adin1110_write_reg(priv, ADIN1110_RESET, ADIN1110_SWRESET);
+	if (ret < 0)
+		return ret;
 
 	ret = adin1110_register_mdiobus(priv, dev);
 	if (ret < 0) {
